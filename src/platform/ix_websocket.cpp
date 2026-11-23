@@ -123,9 +123,8 @@ std::unique_ptr<WebSocket> IxWebSocketFactory::connect(
                 state->cv.notify_all();
                 break;
             case ix::WebSocketMessageType::Message:
-                if (!message->binary) {
-                    state->messages.push_back(message->str);
-                }
+                // RivetKit's "bare" encoding delivers JSON-RPC as binary frames.
+                state->messages.push_back(message->str);
                 state->cv.notify_all();
                 break;
             case ix::WebSocketMessageType::Close:

@@ -957,7 +957,7 @@ bool PairingSession::fetch_actor_token(CarSession* session, std::string* error) 
     if (error && !error->empty()) {
         return false;
     }
-    if (response.status != 200) {
+    if (response.status != 200 && response.status != 201) {
         if (error) {
             *error = "thread actor token returned HTTP " + std::to_string(response.status);
             if (!response.body.empty()) {

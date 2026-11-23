@@ -75,7 +75,19 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         log::info("%s", error.c_str());
     }
 
-    if (!pairing.start(&error)) {
+    CarSession session;
+    bool resumed = false;
+    if (!saved.thread_id.empty()) {
+        if (pairing.load_car_session(&session, &error) && !session.thread_id.empty()) {
+            log::info("saved session still valid; skipping pairing");
+            resumed = true;
+        } else {
+            log::info("saved session not reusable (%s); pairing again",
+                      redact_text(error).c_str());
+        }
+    }
+
+    if (!resumed && !pairing.start(&error)) {
         log::error("cannot start pairing: %s", error.c_str());
         return 1;
     }
@@ -97,14 +109,19 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         log::info("pairing QR written to %s", options.platform.output_path.c_str());
     };
 
-    show_challenge();
+    if (!resumed) {
+        show_challenge();
+    }
     int generation = pairing.challenge_generation();
     std::string shown_code;
 
     const auto deadline = Clock::now() + std::chrono::seconds(options.pair_timeout_seconds);
     PairingStatus status;
+    if (resumed) {
+        status.state = PairingState::Paired;
+    }
     PairingState last_state = PairingState::Idle;
-    while (Clock::now() < deadline) {
+    while (!resumed && Clock::now() < deadline) {
         status = pairing.poll(&error);
         if (!error.empty()) {
             log::warn("pairing poll failed: %s", error.c_str());
@@ -146,21 +163,22 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
     ui.set_pairing(pairing.qr(), "Connecting", "Paired. Starting session...");
     render();
 
-    if (!pairing.establish_session(&error)) {
-        log::error("car session: %s", error.c_str());
-        return 1;
-    }
+    if (!resumed) {
+        if (!pairing.establish_session(&error)) {
+            log::error("car session: %s", error.c_str());
+            return 1;
+        }
 
-    CarSession session;
-    if (!pairing.load_car_session(&session, &error)) {
-        log::error("car data: %s", error.c_str());
-        return 1;
-    }
+        if (!pairing.load_car_session(&session, &error)) {
+            log::error("car data: %s", error.c_str());
+            return 1;
+        }
 
-    if (pairing.persist(session, &error)) {
-        log::info("car session saved for thread %s", session.thread_id.c_str());
-    } else {
-        log::warn("cannot persist car session: %s", error.c_str());
+        if (pairing.persist(session, &error)) {
+            log::info("car session saved for thread %s", session.thread_id.c_str());
+        } else {
+            log::warn("cannot persist car session: %s", error.c_str());
+        }
     }
 
     log::info("car session ready: thread=%s actor=%s capability=%s", session.thread_id.c_str(),
@@ -199,8 +217,16 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
     log::info("actor: connected; observing for %d seconds", options.actor_seconds);
     int message_count = 0;
     auto last_ping = Clock::now();
+    auto last_renew = Clock::now();
     const auto actor_deadline = Clock::now() + std::chrono::seconds(options.actor_seconds);
     while (Clock::now() < actor_deadline) {
+        if (Clock::now() - last_renew >= std::chrono::seconds(30)) {
+            last_renew = Clock::now();
+            std::string renew_error;
+            if (!pairing.establish_session(&renew_error)) {
+                log::warn("car session renew: %s", redact_text(renew_error).c_str());
+            }
+        }
         if (websocket->is_open() && Clock::now() - last_ping >= std::chrono::seconds(30)) {
             websocket->send_text("ping");
             last_ping = Clock::now();
