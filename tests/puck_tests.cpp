@@ -1,6 +1,8 @@
+#include "puck/puck_3d_pose.h"
 #include "puck/puck_rig.h"
 #include "puck/puck_v2.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -586,6 +588,82 @@ void test_malformed_rig() {
     }
 }
 
+void test_pose() {
+    pk::PuckMesh base;
+    pk::PuckRig rig;
+    if (!load_mesh(kBaseMeshPath, &base)) {
+        return;
+    }
+    std::string error;
+    if (!pk::load_puck_rig(kRigPath, &rig, &error)) {
+        CHECK_MSG(false, error);
+        return;
+    }
+
+    const pk::PuckPart* body = find_part(base, "body");
+    CHECK(body != nullptr);
+    if (body != nullptr) {
+        std::vector<pk::PuckVertex> posed;
+        CHECK_MSG(pk::pose_puck_part(*body, rig, &posed, &error), error);
+        CHECK(posed.size() == body->vertices.size());
+        if (posed.size() == body->vertices.size()) {
+            CHECK_NEAR(posed[0].position.x, 247.324654f, 1e-3f);
+            CHECK_NEAR(posed[0].position.y, -66.0f, 1e-3f);
+            CHECK_NEAR(posed[0].position.z, 0.0f, 1e-3f);
+            CHECK_NEAR(posed[0].normal.y, 0.999997f, 1e-4f);
+            CHECK_NEAR(posed[0].tangent.x, -0.995493f, 1e-4f);
+            CHECK_NEAR(posed[0].tangent.w, 1.0f, 1e-6f);
+            CHECK_NEAR(posed[0].uv.x, 0.0f, 1e-6f);
+            CHECK_NEAR(posed[0].extra[2], -10.0f, 1e-6f);
+            float min_x = posed[0].position.x;
+            float max_x = min_x;
+            float min_y = posed[0].position.y;
+            float max_y = min_y;
+            for (const pk::PuckVertex& vertex : posed) {
+                min_x = std::min(min_x, vertex.position.x);
+                max_x = std::max(max_x, vertex.position.x);
+                min_y = std::min(min_y, vertex.position.y);
+                max_y = std::max(max_y, vertex.position.y);
+            }
+            CHECK_NEAR(min_x, 54.1009f, 0.01f);
+            CHECK_NEAR(max_x, 443.0966f, 0.01f);
+            CHECK_NEAR(min_y, -477.0f, 0.01f);
+            CHECK_NEAR(max_y, -66.0f, 0.01f);
+        }
+    }
+
+    const pk::PuckPart* nose = find_part(base, "nose");
+    CHECK(nose != nullptr);
+    if (nose != nullptr) {
+        std::vector<pk::PuckVertex> posed;
+        CHECK_MSG(pk::pose_puck_part(*nose, rig, &posed, &error), error);
+        if (!posed.empty()) {
+            CHECK_NEAR(posed[0].position.x, 286.574309f, 1e-3f);
+            CHECK_NEAR(posed[0].position.y, -180.877702f, 1e-3f);
+            CHECK_NEAR(posed[0].position.z, 176.316566f, 1e-3f);
+        }
+    }
+
+    const pk::PuckPart* leg = find_part(base, "legL");
+    CHECK(leg != nullptr);
+    if (leg != nullptr) {
+        std::vector<pk::PuckVertex> posed;
+        CHECK_MSG(pk::pose_puck_part(*leg, rig, &posed, &error), error);
+        if (!posed.empty()) {
+            CHECK_NEAR(posed[0].position.x, 194.814446f, 1e-3f);
+            CHECK_NEAR(posed[0].position.y, -422.925349f, 1e-3f);
+            CHECK_NEAR(posed[0].position.z, 15.549538f, 1e-3f);
+        }
+    }
+
+    const pk::PuckPart* eye = find_part(base, "eye");
+    CHECK(eye != nullptr);
+    if (eye != nullptr) {
+        std::vector<pk::PuckVertex> posed;
+        CHECK(!pk::pose_puck_part(*eye, rig, &posed, &error));
+    }
+}
+
 struct TestCase {
     const char* name;
     void (*function)();
@@ -598,6 +676,7 @@ int main() {
         {"base mesh", test_base_mesh},
         {"arms mesh", test_arms_mesh},
         {"rig", test_rig},
+        {"pose", test_pose},
         {"minimal mesh and malformed input", test_minimal_mesh_and_malformed},
         {"malformed rig", test_malformed_rig},
     };

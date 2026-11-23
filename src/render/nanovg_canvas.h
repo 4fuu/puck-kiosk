@@ -13,6 +13,7 @@ public:
     bool initialize(const std::string& font_path, std::string* error) override;
     void begin_frame(Size size, float dpi_scale) override;
     void end_frame() override;
+    void flush() override;
 
     ImageHandle create_image(const std::uint8_t* rgba, int width, int height) override;
     void draw_image(ImageHandle image, Rect rect, float alpha) override;
@@ -34,6 +35,7 @@ public:
 private:
     NVGcontext* context_ = nullptr;
     Size size_;
+    float dpi_scale_ = 1.0f;
     bool frame_open_ = false;
 };
 

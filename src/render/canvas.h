@@ -27,6 +27,13 @@ public:
     virtual void begin_frame(Size size, float dpi_scale) = 0;
     virtual void end_frame() = 0;
 
+    // Makes every drawing call issued so far visible without ending the frame.
+    // A renderer that draws with raw GL between 2D calls can flush here, so the
+    // 3D pass lands over the background and later 2D drawing lands over it.
+    // Backends that batch may end and restart their frame; the default is a
+    // no-op for backends that draw immediately.
+    virtual void flush() {}
+
     // Takes straight-alpha RGBA8 pixels. The caller owns the handle and must
     // release it before the canvas is destroyed.
     virtual ImageHandle create_image(const std::uint8_t* rgba, int width, int height) = 0;

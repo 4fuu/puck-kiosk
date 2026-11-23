@@ -74,6 +74,7 @@ bool NanoVgCanvas::initialize(const std::string& font_path, std::string* error) 
 
 void NanoVgCanvas::begin_frame(Size size, float dpi_scale) {
     size_ = size;
+    dpi_scale_ = dpi_scale;
     nvgBeginFrame(context_, static_cast<float>(size.width), static_cast<float>(size.height), dpi_scale);
     frame_open_ = true;
 }
@@ -83,6 +84,20 @@ void NanoVgCanvas::end_frame() {
         nvgEndFrame(context_);
         frame_open_ = false;
     }
+}
+
+void NanoVgCanvas::flush() {
+    if (!context_ || !frame_open_) {
+        return;
+    }
+    // End the frame to submit the queued 2D geometry, then start a fresh one
+    // and restore the caller's drawing state. nvgBeginFrame pushes its own
+    // state before resetting, so the two restores leave the stack as it was.
+    nvgSave(context_);
+    nvgEndFrame(context_);
+    nvgBeginFrame(context_, static_cast<float>(size_.width), static_cast<float>(size_.height), dpi_scale_);
+    nvgRestore(context_);
+    nvgRestore(context_);
 }
 
 ImageHandle NanoVgCanvas::create_image(const std::uint8_t* rgba, int width, int height) {

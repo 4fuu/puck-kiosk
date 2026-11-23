@@ -80,9 +80,21 @@ swaps in the real sprite and face curves.
 - `Puck2D` uses a 498×602 sprite plus the face curve data. For custom avatars,
   the 3D asset manifest's `image-<hash>.webp` is the sprite and the matching
   `puck-<hash>.json` provides `eyes`, `mouth`, `body`, and `limbs`.
-- `Puck3D` parses the PUCK v2 mesh container and runs the four GLES shaders.
+- `Puck3D` parses the PUCK v2 mesh container and runs the part, eye, and
+  spotlight GLES shaders. The body, mouth, nose, and legs are re-posed from the
+  rig on a worker thread; arms keep their authored scene-space geometry and use
+  the 498×602 image texture as props.
 - `create_puck_view()` tries 3D first when enabled, and returns 2D if
   initialization fails. The app never fails because 3D is unavailable.
+
+The 3D pass is drawn into an offscreen RGBA8 + depth target sized to the
+`PuckView` bounds, then composited over the 2D frame with premultiplied alpha.
+`Canvas::flush()` submits the NanoVG geometry queued so far, restarts the frame,
+and restores the caller's drawing state, so the 3D layer lands over the stage
+background and the rest of the UI is queued on top. The offscreen target also
+keeps 3D independent of the platform framebuffer's depth attachment. The dizzy
+star program from the web renderer is omitted because the kiosk has no play or
+morph state.
 
 PUCK v2 container, for the M1 parser:
 
