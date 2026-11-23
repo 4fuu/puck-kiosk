@@ -49,6 +49,8 @@ packages=(
     libgles-dev
     libdrm-dev
     libgbm-dev
+    libinput-dev
+    libudev-dev
     libfreetype-dev
     libharfbuzz-dev
     libwebp-dev

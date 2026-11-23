@@ -5,6 +5,12 @@
 #include "platform/file_secure_store.h"
 #include "platform/headless/headless_display.h"
 #include "platform/ix_websocket.h"
+#if defined(PUCK_KIOSK_BACKEND_DRM)
+#include <cstdlib>
+
+#include "platform/drm/drm_display.h"
+#include "platform/drm/drm_input.h"
+#endif
 
 namespace pk {
 
@@ -15,6 +21,19 @@ std::unique_ptr<Platform> create_platform(const PlatformOptions& options, std::s
         platform->display =
             std::make_unique<HeadlessDisplay>(options.width, options.height, options.output_path, options.frames);
         platform->input = std::make_unique<HeadlessInput>();
+    } else if (options.backend == "drm") {
+#if defined(PUCK_KIOSK_BACKEND_DRM)
+        // An explicit card is needed on boards whose first DRM node is a
+        // render-only GPU.
+        const char* device = std::getenv("PUCK_KIOSK_DRM_DEVICE");
+        platform->display = std::make_unique<DrmDisplay>(device ? device : "");
+        platform->input = create_drm_input(*platform->display);
+#else
+        if (error) {
+            *error = "platform backend 'drm' is not compiled in; rebuild with --backend=drm";
+        }
+        return nullptr;
+#endif
     } else {
         if (error) {
             *error = "platform backend '" + options.backend +

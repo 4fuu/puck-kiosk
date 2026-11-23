@@ -50,6 +50,11 @@ Only `create_platform()` and the backend translation units change when a new
 board is added. `App`, `CarUi`, `Renderer`, and `PuckView` must not include OS
 headers.
 
+`src/platform/drm/` implements the embedded row: `DrmDisplay` (DRM/KMS + GBM +
+EGL) and `DrmInput` (libinput or evdev). Both are compiled only when the build
+is configured with `--backend=drm`; the headless build does not link libdrm,
+GBM, libudev, or libinput.
+
 ## Frame loop
 
 ```text
@@ -65,6 +70,56 @@ while (!display->should_close()) {
 
 The headless backend renders into an FBO and writes a PPM on the last frame.
 A real backend swaps an EGL surface or a DRM/KMS page flip instead.
+
+## DRM/KMS backend
+
+`--backend=drm` builds the direct-scanout backend in `src/platform/drm/`:
+
+- `DrmDisplay` opens the first `/dev/dri/card*` that reports KMS resources (or
+  the path in `PUCK_KIOSK_DRM_DEVICE`), picks the first connected connector with
+  a mode and a usable CRTC, and selects that CRTC's primary plane.
+- Frames render into a GBM surface through EGL's GBM platform
+  (`EGL_PLATFORM_GBM_KHR`). XRGB8888 is tried first and ARGB8888 second, so a
+  driver whose EGL config alpha does not match the buffer format still works.
+- The first frame is a modeset (`drmModeAtomicCommit` with `ALLOW_MODESET`, or
+  `drmModeSetCrtc`). Later frames are page flips, and `swap()` blocks on the
+  flip-complete event, so rendering is paced by vblank. If an atomic commit is
+  rejected at runtime, the backend logs why and falls back to legacy page flips.
+- The connector, CRTC, and mode are saved before the first modeset and restored
+  on shutdown, so exiting the kiosk gives the console back.
+- `DrmInput` prefers libinput on `seat0` and falls back to raw evdev when
+  libinput cannot initialize or is not installed. Touch coordinates are mapped
+  to the display's logical size, a touch or left-button mouse produces
+  `PointerDown`/`PointerMove`/`PointerUp`, and Escape emits `Quit`. The evdev
+  fallback tracks a single touch slot; libinput handles multi-touch slots.
+- The DRM backend ignores `--frames`; it runs until Escape, `SIGINT`, or
+  `SIGTERM`. A smoke test stops it the same way:
+  `timeout -s TERM 10 puck-kiosk --platform drm`.
+
+Errors are reported before the first frame: no `/dev/dri/card*`, no permission
+(add the user to `video`/`input` or run as root), another process holding DRM
+master, no connected connector, no primary plane, or a GBM/EGL failure. None of
+them crash the app.
+
+### Hardware checklist
+
+The orb used for development has no `/dev/dri`, so the DRM path is verified by
+compilation and by its error paths only. On a real board, check:
+
+1. The process can become DRM master: no compositor or getty owns the device,
+   and the user is in `video` (or the unit runs as root). A seat manager is not
+   required, but a compositor would conflict.
+2. The log shows the expected connector and mode, for example
+   `drm: /dev/dri/card0 HDMI-A-1 1920x1080@60Hz, atomic, GBM <driver>`.
+3. If it says `legacy page flips`, the kernel or driver lacks atomic modesetting.
+   The picture should still appear and flips should still be tear-free.
+4. The pairing screen is stable for several minutes, `swap()` is vblank-paced,
+   and no `drm:` warnings appear.
+5. Touch reaches all four corners of the panel (mapping uses the mode's pixel
+   size), the pointer moves, and Escape exits.
+6. `Ctrl-C` or a service stop restores the previous CRTC and console.
+7. On a multi-GPU board, `PUCK_KIOSK_DRM_DEVICE=/dev/dri/card1` selects the
+   display controller.
 
 ## Puck 2D and 3D
 

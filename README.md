@@ -24,8 +24,9 @@ matching the web client's behavior when WebGL2 is unavailable.
 
 - Linux (embedded or desktop), C++17 compiler, [xmake](https://xmake.io)
 - EGL and OpenGL ES 3.0 development headers
-- A display stack on the target: DRM/KMS (planned), Wayland (planned), or X11
-  (planned). The M0 build uses a headless EGL surfaceless surface.
+- A display stack on the target: DRM/KMS (implemented, needs hardware
+  verification), Wayland (planned), or X11 (planned). The default build uses a
+  headless EGL surfaceless surface.
 - 512 MB RAM target; the renderer and assets are sized for that budget.
 - No Chromium, WebKit, Electron, or Flutter runtime.
 
@@ -93,7 +94,7 @@ Puck asset details, the media-presentation flow, and the porting checklist.
 | Backend | Status | Notes |
 | --- | --- | --- |
 | headless | Works | EGL surfaceless + llvmpipe; used for CI and orb screenshots |
-| DRM/KMS | Planned | Direct scanout on embedded Linux, no compositor |
+| DRM/KMS | Implemented, unverified on hardware | Direct scanout + libinput/evdev input; build with `--backend=drm` |
 | Wayland | Planned | Desktop and compositor-based embedded images |
 | X11 | Planned | Desktop fallback |
 
