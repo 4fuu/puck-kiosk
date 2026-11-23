@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+export PATH="$HOME/.local/bin:$PATH"
+
+step() {
+    printf '\n==> %s\n' "$*"
+}
+
+step "xmake"
+if ! command -v xmake >/dev/null 2>&1; then
+    curl -fsSL https://xmake.io/shget.text | bash >/tmp/puck-kiosk-xmake-install.log 2>&1
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+if ! command -v xmake >/dev/null 2>&1; then
+    echo "xmake installation failed; see /tmp/puck-kiosk-xmake-install.log" >&2
+    tail -40 /tmp/puck-kiosk-xmake-install.log >&2 || true
+    exit 1
+fi
+xmake --version >/dev/null 2>&1
+
+# Make xmake available to later non-interactive login shells and supervised
+# services. The installer edits ~/.bashrc, which is not enough for `bash -lc`.
+profile="$HOME/.bash_profile"
+marker="# puck-kiosk toolchain"
+if ! grep -Fqx "$marker" "$profile" 2>/dev/null; then
+    cat >>"$profile" <<'EOF'
+
+# puck-kiosk toolchain
+if [ -d "$HOME/.local/bin" ]; then
+    case ":$PATH:" in
+        *":$HOME/.local/bin:"*) ;;
+        *) export PATH="$HOME/.local/bin:$PATH" ;;
+    esac
+fi
+EOF
+fi
+
+step "system packages"
+packages=(
+    build-essential
+    pkg-config
+    curl
+    git
+    ca-certificates
+    libegl-dev
+    libgles-dev
+    libdrm-dev
+    libgbm-dev
+    libfreetype-dev
+    libharfbuzz-dev
+    libwebp-dev
+    libpng-dev
+    libjpeg-dev
+    libcurl4-openssl-dev
+    libssl-dev
+    libasound2-dev
+    libqrencode-dev
+    libgstreamer1.0-dev
+    libgstreamer-plugins-base1.0-dev
+)
+missing=()
+for package in "${packages[@]}"; do
+    if ! dpkg -s "$package" >/dev/null 2>&1; then
+        missing+=("$package")
+    fi
+done
+if ((${#missing[@]} > 0)); then
+    sudo_cmd=()
+    if ((EUID != 0)); then
+        if command -v sudo >/dev/null 2>&1; then
+            sudo_cmd=(sudo)
+        else
+            echo "missing packages: ${missing[*]}; run as root or install sudo" >&2
+            exit 1
+        fi
+    fi
+    "${sudo_cmd[@]}" apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive "${sudo_cmd[@]}" apt-get install -y -qq "${missing[@]}"
+else
+    echo "all system packages already present"
+fi
+
+step "configure and build (headless)"
+xmake f -y -m release --backend=headless >/dev/null
+xmake build -y puck-kiosk
+
+step "headless smoke render"
+xmake run puck-kiosk --headless --frames 1 --out build/setup-smoke.ppm >/dev/null
+test -s build/setup-smoke.ppm
+echo "setup ok: $(du -h build/setup-smoke.ppm | cut -f1) $(pwd)/build/setup-smoke.ppm"

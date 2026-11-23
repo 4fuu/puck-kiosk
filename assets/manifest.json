@@ -1,0 +1,49 @@
+{
+  "source": "https://static.ampcode.com/content/puck/",
+  "generated": "2026-11-23",
+  "note": "Development fixtures. Amp's Puck art is not redistributed with this repository; fetch it at runtime and keep the cache out of git.",
+  "assets": [
+    {
+      "path": "3d/base-36354b03.bin",
+      "url": "https://static.ampcode.com/content/puck/3d/base-36354b03.bin",
+      "sha256": "36354b03874ca1cb5987d6a8c65a8e96e374871cdb6ab5f4688f0076abe144eb",
+      "bytes": 960492
+    },
+    {
+      "path": "3d/classic/puck-499552ba.json",
+      "url": "https://static.ampcode.com/content/puck/3d/classic/puck-499552ba.json",
+      "sha256": "499552baf4307c8ede23772f79f9011770f6948b24451b42046435b6853b7183",
+      "bytes": 3567
+    },
+    {
+      "path": "3d/classic/albedo-09254c33.webp",
+      "url": "https://static.ampcode.com/content/puck/3d/classic/albedo-09254c33.webp",
+      "sha256": "09254c338730e6c8d04c393382ebc53c09e5f6c5d0e5d9dbe5f6ba95a90c9900",
+      "bytes": 154928
+    },
+    {
+      "path": "3d/classic/normal-539ef9bd.webp",
+      "url": "https://static.ampcode.com/content/puck/3d/classic/normal-539ef9bd.webp",
+      "sha256": "539ef9bd4bdb61e90f52f4d398ab0deea29cb4cbc83aa177ef5aaf5d5776aa64",
+      "bytes": 189634
+    },
+    {
+      "path": "3d/classic/image-983fb864.webp",
+      "url": "https://static.ampcode.com/content/puck/3d/classic/image-983fb864.webp",
+      "sha256": "983fb864b515155d4458e696f54612983cbbdb1a90aed696105177330b6d0847",
+      "bytes": 42270
+    },
+    {
+      "path": "3d/classic/arms-4a1f8a15.bin",
+      "url": "https://static.ampcode.com/content/puck/3d/classic/arms-4a1f8a15.bin",
+      "sha256": "4a1f8a150a9bc97a1bea4ef3b64ad2ed0d4b9e9b3a32148e36133a71b4890720",
+      "bytes": 410548
+    },
+    {
+      "path": "avatars/classic-9012f611.png",
+      "url": "https://static.ampcode.com/content/puck/avatars/classic-9012f611.png",
+      "sha256": "9012f6112b2770ecd5d01ef59719bcf12e3cdbe38722d35a18ab9c586cefa625",
+      "bytes": 238229
+    }
+  ]
+}

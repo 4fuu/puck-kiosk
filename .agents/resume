@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+export PATH="$HOME/.local/bin:$PATH"
+
+# Keep wake-ups fast: repair the configured build if the toolchain is present,
+# but never install anything here. Setup owns installation.
+if command -v xmake >/dev/null 2>&1; then
+    xmake f -y -m release --backend=headless >/dev/null 2>&1 || true
+    xmake build -y >/dev/null 2>&1 || true
+fi
+
+exit 0
