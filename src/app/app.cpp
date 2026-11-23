@@ -1,14 +1,20 @@
 #include "app/app.h"
 
+#include "app/call_flow.h"
 #include "app/car_ui.h"
 #include "app/pairing.h"
 #include "core/log.h"
+#include "platform/audio.h"
 #include "puck/puck_view.h"
 #include "render/renderer.h"
+#include "voice/aec.h"
+#include "voice/engine.h"
+#include "voice/loopback.h"
 
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <regex>
 #include <string>
@@ -63,6 +69,90 @@ void log_actor_message(const std::string& text) {
         return;
     }
     log::info("actor <- %s", redact_json(text, 300).c_str());
+}
+
+int run_voice_loopback_mode(const AppOptions& options) {
+    std::string error;
+    FileAudioOptions first_options;
+    first_options.tone_hz = 440.0;
+    first_options.capture_path = "build/voice-loopback-a-capture.wav";
+    first_options.playback_path = "build/voice-loopback-a.wav";
+    FileAudioOptions second_options;
+    second_options.tone_hz = 660.0;
+    second_options.capture_path = "build/voice-loopback-b-capture.wav";
+    second_options.playback_path = "build/voice-loopback-b.wav";
+
+    auto first = create_file_audio(first_options, &error);
+    if (!first) {
+        log::error("loopback audio A: %s", error.c_str());
+        return 1;
+    }
+    auto second = create_file_audio(second_options, &error);
+    if (!second) {
+        log::error("loopback audio B: %s", error.c_str());
+        return 1;
+    }
+
+    voice::LoopbackOptions loop;
+    loop.seconds = options.voice_loopback_seconds;
+    loop.aec = options.voice_aec;
+    loop.reorder_every = 5;
+    loop.drop_every = 17;
+    const int result = voice::run_voice_loopback(*first, *second, loop);
+
+    for (const char* path : {first_options.playback_path.c_str(),
+                             second_options.playback_path.c_str(),
+                             first_options.capture_path.c_str(),
+                             second_options.capture_path.c_str()}) {
+        std::error_code code;
+        const auto size = std::filesystem::file_size(path, code);
+        if (!code) {
+            log::info("loopback wav %s: %llu bytes", path,
+                      static_cast<unsigned long long>(size));
+        }
+    }
+    return result;
+}
+
+CallView demo_call_view(const std::string& state) {
+    CallView view;
+    view.input_level = 0.05f;
+    view.jitter_ms = 60;
+    if (state == "connecting") {
+        view.phase = CallPhase::Connecting;
+        view.caption = "Connecting";
+        view.detail = "Setting up the voice channel";
+    } else if (state == "speaking") {
+        view.phase = CallPhase::Speaking;
+        view.caption = "Puck is speaking";
+        view.detail = "I can help with that.";
+        view.speaking = true;
+        view.output_level = 0.2f;
+        view.mouth = 0.7f;
+    } else if (state == "thinking") {
+        view.phase = CallPhase::Thinking;
+        view.caption = "Puck is thinking";
+        view.detail = "Working on your request";
+        view.thinking = true;
+    } else if (state == "muted") {
+        view.phase = CallPhase::Muted;
+        view.caption = "Microphone off";
+        view.detail = "Puck can't hear you";
+        view.muted = true;
+    } else if (state == "ended") {
+        view.phase = CallPhase::Ended;
+        view.caption = "Call Ended";
+        view.detail = "The call ended";
+    } else if (state == "failed") {
+        view.phase = CallPhase::Failed;
+        view.caption = "Call failed";
+        view.detail = "WebRTC connect timeout";
+    } else {
+        view.phase = CallPhase::Active;
+        view.caption = "On a call with Puck";
+        view.detail = "Puck is listening";
+    }
+    return view;
 }
 
 int run_pairing(const AppOptions& options, Platform& platform, Renderer& renderer, CarUi& ui) {
@@ -255,16 +345,49 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
     double token_exp = ws_token_exp_seconds(session.ws_token);
 
     log::info("actor: connected; observing for %d seconds", options.actor_seconds);
+
+    std::unique_ptr<voice::VoiceEngine> voice_engine;
+    std::unique_ptr<CallController> call;
+    voice::VoiceEngineStats final_stats;
+    bool call_failed = false;
+    if (options.call) {
+        if (!platform.audio) {
+            log::error("voice: no audio backend is available");
+            return 2;
+        }
+        voice::VoiceEngineOptions voice_options;
+        voice_options.enable_aec = options.voice_aec;
+        voice_engine = std::make_unique<voice::VoiceEngine>(*platform.audio, voice_options);
+        CallOptions call_options;
+        call_options.mute_after_seconds = options.mute_after_seconds;
+        call_options.end_after_seconds = options.end_after_seconds;
+        call = std::make_unique<CallController>(*websocket, *voice_engine, call_options);
+        voice_engine->set_data_callback([&call](const std::string& text) {
+            if (call) {
+                call->on_data_message(text);
+            }
+        });
+        std::string call_error;
+        if (!call->start(&call_error)) {
+            log::error("voice: cannot start call: %s", call_error.c_str());
+            return 2;
+        }
+    }
+
     int message_count = 0;
     auto last_ping = Clock::now();
+    auto last_render = Clock::now();
     auto last_renew = Clock::now();
     const auto actor_deadline = Clock::now() + std::chrono::seconds(options.actor_seconds);
-    while (Clock::now() < actor_deadline) {
+    while (Clock::now() < actor_deadline || (call && call->active())) {
         if (Clock::now() - last_renew >= std::chrono::seconds(30)) {
             last_renew = Clock::now();
             std::string renew_error;
             if (!pairing.establish_session(&renew_error)) {
                 log::warn("car session renew: %s", redact_text(renew_error).c_str());
+                if (call && renew_error.find("401") != std::string::npos) {
+                    call->end("car session expired");
+                }
             } else {
                 // The session cookie rotates on every renew; keep the stored
                 // copy current or the next process resumes with a dead cookie.
@@ -286,6 +409,11 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
                 if (!connect_actor(&websocket)) {
                     break;
                 }
+                if (call) {
+                    call->rebind_actor(*websocket);
+                    call->reattach();
+                }
+                last_ping = Clock::now();
                 log::info("actor: reconnected with a refreshed token");
             } else {
                 log::warn("actor token refresh: %s", redact_text(token_error).c_str());
@@ -299,20 +427,61 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         std::string message;
         std::string poll_error;
         if (websocket->poll(message, &poll_error)) {
-            if (message == "pong") {
-                continue;
+            if (message != "pong") {
+                ++message_count;
+                log_actor_message(message);
+                if (call) {
+                    call->on_actor_message(message);
+                }
             }
-            ++message_count;
-            log_actor_message(message);
-            continue;
+        } else {
+            if (!websocket->is_open()) {
+                break;
+            }
+            if (!poll_error.empty()) {
+                log::warn("actor: %s", redact_text(poll_error).c_str());
+            }
         }
-        if (!websocket->is_open()) {
-            break;
-        }
-        if (!poll_error.empty()) {
-            log::warn("actor: %s", redact_text(poll_error).c_str());
+        if (call) {
+            // Capture counters before tick(): ending the call releases the peer.
+            final_stats = voice_engine->stats();
+            call->tick(Clock::now());
+            ui.set_call(call->view());
+            ui.set_visual(call->visual());
+            if (Clock::now() - last_render >= std::chrono::milliseconds(100)) {
+                render();
+                last_render = Clock::now();
+            }
+            if (call->ended() || call->failed()) {
+                call_failed = call->failed();
+                break;
+            }
         }
     }
+
+    if (call && !call->ended() && !call->failed()) {
+        final_stats = voice_engine->stats();
+        call->end("actor observation finished");
+    }
+    if (call_failed) {
+        log::error("voice: call failed: %s", call->last_error().c_str());
+    }
+    if (voice_engine) {
+        log::info(
+            "voice stats: sent=%llu received=%llu decoded=%llu concealed=%llu reordered=%llu "
+            "late=%llu nack=%llu retransmitted=%llu jitter=%dms in=%.3f out=%.3f",
+            static_cast<unsigned long long>(final_stats.sent_packets),
+            static_cast<unsigned long long>(final_stats.received_packets),
+            static_cast<unsigned long long>(final_stats.decoded_frames),
+            static_cast<unsigned long long>(final_stats.concealed_frames),
+            static_cast<unsigned long long>(final_stats.reordered_packets),
+            static_cast<unsigned long long>(final_stats.late_packets),
+            static_cast<unsigned long long>(final_stats.nack_requests),
+            static_cast<unsigned long long>(final_stats.retransmitted_packets),
+            final_stats.jitter_target_frames * 20, final_stats.input_level,
+            final_stats.output_level);
+    }
+
     const bool actor_was_open = websocket->is_open();
     const std::string close_reason = websocket->close_reason();
     websocket->close();
@@ -320,17 +489,38 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         log::info("actor: closed (%s)", redact_text(close_reason).c_str());
     }
     log::info("actor: observed %d message(s)", message_count);
+    if (call_failed) {
+        return 2;
+    }
     return actor_was_open ? 0 : 2;
 }
 
 }  // namespace
 
 int App::run(const AppOptions& options) {
+    if (options.voice_aec_smoke) {
+        double erle_db = 0.0;
+        std::string error;
+        if (!voice::run_aec_smoke_test(5, &erle_db, &error)) {
+            log::error("AEC smoke failed: %s", error.c_str());
+            return 1;
+        }
+        log::info("AEC smoke: ERLE %.1f dB", erle_db);
+        return 0;
+    }
+    if (options.voice_loopback) {
+        return run_voice_loopback_mode(options);
+    }
+    if (options.call && !options.pair) {
+        log::error("--call requires --pair");
+        return 2;
+    }
+
     std::string error;
     PlatformOptions platform_options = options.platform;
-    if (options.pair) {
-        // Pairing writes a snapshot after each state change; a frame counter
-        // larger than one would suppress those writes on the headless backend.
+    if (options.pair || options.demo_call) {
+        // Pairing writes a snapshot after each state change, and the demo call
+        // is a single frame; a larger counter would suppress those writes.
         platform_options.frames = 1;
     }
     auto platform = create_platform(platform_options, &error);
@@ -355,6 +545,23 @@ int App::run(const AppOptions& options) {
     log::info("Puck renderer: %s", puck->name());
 
     CarUi ui(*puck);
+    if (options.demo_call) {
+        const CallView view = demo_call_view(options.demo_call_state);
+        PuckVisual visual;
+        visual.speaking = view.speaking;
+        visual.listening = view.phase == CallPhase::Active && !view.muted;
+        visual.thinking = view.thinking;
+        visual.not_listening = view.muted;
+        visual.mouth = view.mouth;
+        ui.set_visual(visual);
+        ui.set_call(view);
+        platform->display->make_current();
+        renderer.begin(platform->display->size(), platform->display->dpi_scale());
+        ui.draw(renderer.canvas(), platform->display->size(), 0.0f);
+        renderer.end();
+        platform->display->swap();
+        return 0;
+    }
     if (options.pair) {
         return run_pairing(options, *platform, renderer, ui);
     }

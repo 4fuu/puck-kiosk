@@ -57,6 +57,8 @@ packages=(
     libcurl4-openssl-dev
     libssl-dev
     libasound2-dev
+    libopus-dev
+    libwebrtc-audio-processing-dev
     libqrencode-dev
     libgstreamer1.0-dev
     libgstreamer-plugins-base1.0-dev

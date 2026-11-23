@@ -61,6 +61,37 @@ struct PuckVisual {
     float mouth = 0.0f;
 };
 
+enum class CallPhase {
+    Idle,
+    Starting,
+    Connecting,
+    Active,
+    Speaking,
+    Thinking,
+    Muted,
+    Ended,
+    Failed,
+};
+
+struct CallView {
+    CallPhase phase = CallPhase::Idle;
+    std::string caption = "Call Puck";
+    std::string detail;
+    bool muted = false;
+    bool speaking = false;
+    bool thinking = false;
+    float input_level = 0.0f;
+    float output_level = 0.0f;
+    float mouth = 0.0f;
+    int jitter_ms = 0;
+
+    bool in_call() const {
+        return phase == CallPhase::Starting || phase == CallPhase::Connecting ||
+               phase == CallPhase::Active || phase == CallPhase::Speaking ||
+               phase == CallPhase::Thinking || phase == CallPhase::Muted;
+    }
+};
+
 struct Avatar {
     std::string id = "classic";
     std::string image_path;

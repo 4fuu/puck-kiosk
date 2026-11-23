@@ -24,7 +24,21 @@ void print_help(const char* program) {
               << "  --no-3d                 Force the 2D Puck renderer\n"
               << "  --pair                  Pair with a phone, render the QR, then connect the actor\n"
               << "  --pair-timeout <s>      Seconds to wait for phone approval (default 600)\n"
-              << "  --actor-seconds <s>     Seconds to log actor messages after pairing (default 60)\n"
+              << "  --actor-seconds <s>     Observation window after pairing; a live call keeps running (default 60)\n"
+              << "  --call                  Start a voice call after pairing (requires --pair)\n"
+              << "  --mute-after <s>        Mute the call N seconds after it starts\n"
+              << "  --end-after <s>         End the call N seconds after it starts\n"
+              << "  --no-aec                Disable echo cancellation\n"
+              << "  --voice-loopback        Run two local voice peers against each other and exit\n"
+              << "  --voice-seconds <s>     Loopback duration in seconds (default 5)\n"
+              << "  --voice-aec-smoke       Run the AEC echo-return-loss smoke test and exit\n"
+              << "  --demo-call             Render the call screen once and exit\n"
+              << "  --demo-call-state <s>   connecting|active|speaking|thinking|muted|ended|failed\n"
+              << "  --audio <name>          auto | file | null | alsa\n"
+              << "  --voice-out <path>      WAV sink for decoded call audio\n"
+              << "  --voice-capture <path>  WAV of the synthetic capture signal\n"
+              << "  --alsa-capture <dev>    ALSA capture device (default: default)\n"
+              << "  --alsa-playback <dev>   ALSA playback device (default: default)\n"
               << "  -h, --help              Show this help\n";
 }
 
@@ -80,6 +94,76 @@ int main(int argc, char** argv) {
         }
         if (argument == "--pair") {
             options.pair = true;
+            continue;
+        }
+        if (argument == "--call") {
+            options.call = true;
+            continue;
+        }
+        if (argument == "--no-aec") {
+            options.voice_aec = false;
+            continue;
+        }
+        if (argument == "--voice-loopback") {
+            options.voice_loopback = true;
+            continue;
+        }
+        if (argument == "--voice-aec-smoke") {
+            options.voice_aec_smoke = true;
+            continue;
+        }
+        if (argument == "--demo-call") {
+            options.demo_call = true;
+            continue;
+        }
+        if (argument == "--demo-call-state" && i + 1 < argc) {
+            options.demo_call_state = argv[++i];
+            continue;
+        }
+        if (argument == "--audio" && i + 1 < argc) {
+            const std::string audio = argv[++i];
+            if (audio != "auto" && audio != "file" && audio != "null" && audio != "alsa") {
+                pk::log::error("invalid --audio value: %s", audio.c_str());
+                return 2;
+            }
+            options.platform.audio_backend = audio;
+            continue;
+        }
+        if (argument == "--voice-out" && i + 1 < argc) {
+            options.platform.audio_playback_path = argv[++i];
+            continue;
+        }
+        if (argument == "--voice-capture" && i + 1 < argc) {
+            options.platform.audio_capture_path = argv[++i];
+            continue;
+        }
+        if (argument == "--alsa-capture" && i + 1 < argc) {
+            options.platform.alsa_capture_device = argv[++i];
+            continue;
+        }
+        if (argument == "--alsa-playback" && i + 1 < argc) {
+            options.platform.alsa_playback_device = argv[++i];
+            continue;
+        }
+        if (argument == "--mute-after" && i + 1 < argc) {
+            if (!parse_nonnegative_int(argv[++i], &options.mute_after_seconds)) {
+                pk::log::error("invalid --mute-after");
+                return 2;
+            }
+            continue;
+        }
+        if (argument == "--end-after" && i + 1 < argc) {
+            if (!parse_nonnegative_int(argv[++i], &options.end_after_seconds)) {
+                pk::log::error("invalid --end-after");
+                return 2;
+            }
+            continue;
+        }
+        if (argument == "--voice-seconds" && i + 1 < argc) {
+            if (!parse_int(argv[++i], &options.voice_loopback_seconds)) {
+                pk::log::error("invalid --voice-seconds");
+                return 2;
+            }
             continue;
         }
         if (argument == "--platform" && i + 1 < argc) {
