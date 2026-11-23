@@ -1124,6 +1124,83 @@ void MediaOverlay::log_state(const char* prefix) const {
               presentation_->title.empty() ? "(none)" : presentation_->title.c_str());
 }
 
+namespace {
+
+struct OverlayLayout {
+    float header_height = 0.0f;
+    float pad = 0.0f;
+    float title_size = 0.0f;
+    float close_size = 0.0f;
+    float close_height = 0.0f;
+    Rect close;
+    Rect frame;
+    Rect content;
+    float nav_radius = 0.0f;
+    float nav_margin = 0.0f;
+    bool navigation = false;
+    bool can_previous = false;
+    bool can_next = false;
+};
+
+OverlayLayout overlay_layout(Canvas& canvas, Rect stage, const MediaPresentation& presentation,
+                             int index) {
+    OverlayLayout layout;
+    layout.header_height = std::clamp(stage.h * 0.185f, 56.0f, 96.0f);
+    layout.pad = std::clamp(stage.w * 0.03125f, 18.0f, 40.0f);
+    layout.title_size = std::clamp(stage.h * 0.058f, 18.0f, 30.0f);
+    layout.close_size = std::clamp(stage.h * 0.046f, 16.0f, 24.0f);
+    layout.close_height = std::clamp(layout.header_height * 0.83f, 44.0f, 80.0f);
+    const float close_padding = std::clamp(stage.w * 0.0375f, 20.0f, 48.0f);
+    const float close_width =
+        canvas.measure_text(layout.close_size, "Close") + close_padding * 2.0f;
+    layout.close = Rect{stage.x + stage.w - layout.pad - close_width,
+                        stage.y + (layout.header_height - layout.close_height) * 0.5f,
+                        close_width, layout.close_height};
+    layout.frame = Rect{stage.x + layout.pad, stage.y + layout.header_height,
+                        stage.w - layout.pad * 2.0f,
+                        stage.h - layout.header_height - layout.pad * 0.5f};
+    layout.navigation = presentation.items.size() > 1;
+    layout.nav_radius = std::clamp(layout.frame.h * 0.10f, 28.0f, 48.0f);
+    layout.nav_margin = std::max(12.0f, layout.pad * 0.6f);
+    const float base_inset = std::min(layout.frame.w * 0.10f, 140.0f);
+    const float content_inset =
+        layout.navigation
+            ? std::max(base_inset, layout.nav_margin + layout.nav_radius * 2.0f + 8.0f)
+            : base_inset;
+    layout.content = Rect{layout.frame.x + content_inset,
+                          layout.frame.y + layout.pad * 0.25f,
+                          layout.frame.w - content_inset * 2.0f,
+                          layout.frame.h - layout.pad * 0.75f};
+    layout.can_previous = index > 0;
+    layout.can_next = index + 1 < static_cast<int>(presentation.items.size());
+    return layout;
+}
+
+}  // namespace
+
+MediaButtons MediaOverlay::buttons(Canvas& canvas, Rect stage) const {
+    MediaButtons buttons;
+    if (!visible() || stage.w <= 0.0f || stage.h <= 0.0f) {
+        return buttons;
+    }
+    const OverlayLayout layout = overlay_layout(canvas, stage, *presentation_, index_);
+    buttons.close = layout.close;
+    buttons.navigation = layout.navigation;
+    buttons.can_previous = layout.can_previous;
+    buttons.can_next = layout.can_next;
+    if (layout.navigation) {
+        const float center_y = layout.frame.center_y();
+        const float left_x = layout.frame.x + layout.nav_margin + layout.nav_radius;
+        const float right_x =
+            layout.frame.x + layout.frame.w - layout.nav_margin - layout.nav_radius;
+        buttons.previous = Rect{left_x - layout.nav_radius, center_y - layout.nav_radius,
+                                layout.nav_radius * 2.0f, layout.nav_radius * 2.0f};
+        buttons.next = Rect{right_x - layout.nav_radius, center_y - layout.nav_radius,
+                            layout.nav_radius * 2.0f, layout.nav_radius * 2.0f};
+    }
+    return buttons;
+}
+
 void MediaOverlay::draw(Canvas& canvas, Rect stage) const {
     if (!visible() || stage.w <= 0.0f || stage.h <= 0.0f) {
         return;
@@ -1139,19 +1216,10 @@ void MediaOverlay::draw(Canvas& canvas, Rect stage) const {
     const Color secondary = hex(0x232b23);
     canvas.fill_rect(stage, background);
 
-    const float header_height = std::clamp(stage.h * 0.185f, 56.0f, 96.0f);
-    const float pad = std::clamp(stage.w * 0.03125f, 18.0f, 40.0f);
-    const float title_size = std::clamp(stage.h * 0.058f, 18.0f, 30.0f);
-    const float close_size = std::clamp(stage.h * 0.046f, 16.0f, 24.0f);
-    const float close_height = std::clamp(header_height * 0.83f, 44.0f, 80.0f);
-    const float close_padding = std::clamp(stage.w * 0.0375f, 20.0f, 48.0f);
-    const float close_width = canvas.measure_text(close_size, "Close") + close_padding * 2.0f;
-    const Rect close_rect{stage.x + stage.w - pad - close_width,
-                          stage.y + (header_height - close_height) * 0.5f, close_width,
-                          close_height};
-    canvas.fill_rounded_rect(close_rect, close_height * 0.5f, secondary);
-    canvas.text(close_rect.center_x(), close_rect.center_y() + close_size * 0.36f, close_size,
-                foreground, TextAlign::Center, "Close");
+    const OverlayLayout layout = overlay_layout(canvas, stage, *presentation_, index_);
+    canvas.fill_rounded_rect(layout.close, layout.close_height * 0.5f, secondary);
+    canvas.text(layout.close.center_x(), layout.close.center_y() + layout.close_size * 0.36f,
+                layout.close_size, foreground, TextAlign::Center, "Close");
 
     std::string title = presentation_->title;
     if (title.empty()) {
@@ -1160,22 +1228,12 @@ void MediaOverlay::draw(Canvas& canvas, Rect stage) const {
     if (title.empty()) {
         title = "Puck's image";
     }
-    const float title_max = close_rect.x - pad - (stage.x + pad);
-    title = fit_text(canvas, title_size, title, title_max);
-    canvas.text(stage.x + pad, stage.y + header_height * 0.5f, title_size, foreground,
-                TextAlign::Left, title);
+    const float title_max = layout.close.x - layout.pad - (stage.x + layout.pad);
+    title = fit_text(canvas, layout.title_size, title, title_max);
+    canvas.text(stage.x + layout.pad, stage.y + layout.header_height * 0.5f, layout.title_size,
+                foreground, TextAlign::Left, title);
 
-    const Rect frame{stage.x + pad, stage.y + header_height, stage.w - pad * 2.0f,
-                     stage.h - header_height - pad * 0.5f};
-    const bool has_navigation = presentation_->items.size() > 1;
-    const float nav_radius = std::clamp(frame.h * 0.10f, 28.0f, 48.0f);
-    const float nav_margin = std::max(12.0f, pad * 0.6f);
-    const float base_inset = std::min(frame.w * 0.10f, 140.0f);
-    const float content_inset =
-        has_navigation ? std::max(base_inset, nav_margin + nav_radius * 2.0f + 8.0f)
-                       : base_inset;
-    const Rect content{frame.x + content_inset, frame.y + pad * 0.25f,
-                       frame.w - content_inset * 2.0f, frame.h - pad * 0.75f};
+    const Rect& content = layout.content;
 
     const ImageHandle image = find_image(item->id);
     const std::size_t item_index =
@@ -1214,20 +1272,19 @@ void MediaOverlay::draw(Canvas& canvas, Rect stage) const {
                     "Loading picture");
     }
 
-    if (has_navigation) {
-        const float center_y = frame.center_y();
-        const float left_x = frame.x + nav_margin + nav_radius;
-        const float right_x = frame.x + frame.w - nav_margin - nav_radius;
-        const bool has_previous = index_ > 0;
-        const bool has_next = index_ + 1 < static_cast<int>(presentation_->items.size());
-        canvas.fill_circle(left_x, center_y, nav_radius,
-                           hex(0x232b23, has_previous ? 1.0f : 0.3f));
-        canvas.fill_circle(right_x, center_y, nav_radius,
-                           hex(0x232b23, has_next ? 1.0f : 0.3f));
-        draw_chevron(canvas, left_x, center_y, nav_radius * 1.4f, true,
-                     hex(0xf6fff5, has_previous ? 1.0f : 0.35f));
-        draw_chevron(canvas, right_x, center_y, nav_radius * 1.4f, false,
-                     hex(0xf6fff5, has_next ? 1.0f : 0.35f));
+    if (layout.navigation) {
+        const float center_y = layout.frame.center_y();
+        const float left_x = layout.frame.x + layout.nav_margin + layout.nav_radius;
+        const float right_x =
+            layout.frame.x + layout.frame.w - layout.nav_margin - layout.nav_radius;
+        canvas.fill_circle(left_x, center_y, layout.nav_radius,
+                           hex(0x232b23, layout.can_previous ? 1.0f : 0.3f));
+        canvas.fill_circle(right_x, center_y, layout.nav_radius,
+                           hex(0x232b23, layout.can_next ? 1.0f : 0.3f));
+        draw_chevron(canvas, left_x, center_y, layout.nav_radius * 1.4f, true,
+                     hex(0xf6fff5, layout.can_previous ? 1.0f : 0.35f));
+        draw_chevron(canvas, right_x, center_y, layout.nav_radius * 1.4f, false,
+                     hex(0xf6fff5, layout.can_next ? 1.0f : 0.35f));
     }
 }
 

@@ -5,7 +5,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 namespace {
@@ -24,7 +26,7 @@ void print_help(const char* program) {
               << "  --no-3d                 Force the 2D Puck renderer\n"
               << "  --pair                  Pair with a phone, render the QR, then connect the actor\n"
               << "  --pair-timeout <s>      Seconds to wait for phone approval (default 600)\n"
-              << "  --actor-seconds <s>     Observation window after pairing; a live call keeps running (default 60)\n"
+              << "  --actor-seconds <s>     Observation window after pairing; 0 runs until quit (default 60)\n"
               << "  --call                  Start a voice call after pairing (requires --pair)\n"
               << "  --mute-after <s>        Mute the call N seconds after it starts\n"
               << "  --end-after <s>         End the call N seconds after it starts\n"
@@ -33,9 +35,15 @@ void print_help(const char* program) {
               << "  --voice-seconds <s>     Loopback duration in seconds (default 5)\n"
               << "  --voice-aec-smoke       Run the AEC echo-return-loss smoke test and exit\n"
               << "  --demo-call             Render the call screen once and exit\n"
-              << "  --demo-call-state <s>   connecting|active|speaking|thinking|muted|ended|failed\n"
+              << "  --demo-call-state <s>   idle|connecting|active|speaking|thinking|muted|ended|failed\n"
               << "  --demo-media <json|path> Render the media overlay once and exit; use null for closed\n"
               << "  --demo-media-index <n>  Item to show in the media demo (default 0)\n"
+              << "  --demo-plugin <json|path> Feed a plugin.ui.* event before rendering the demo\n"
+              << "  --demo-passkey <mode>   phone|local|confirming|none (passkey guidance demo)\n"
+              << "  --demo-debug            Open the Debug panel in the demo\n"
+              << "  --input-script <json|path> Scripted {t,type,x,y,key} events; test hook\n"
+              << "  --dump-targets          Log the hit rects of the current screen\n"
+              << "  --echo-cancellation <m> on|remote-only|off (default on)\n"
               << "  --audio <name>          auto | file | null | alsa\n"
               << "  --voice-out <path>      WAV sink for decoded call audio\n"
               << "  --voice-capture <path>  WAV of the synthetic capture signal\n"
@@ -132,6 +140,51 @@ int main(int argc, char** argv) {
                 pk::log::error("invalid --demo-media-index");
                 return 2;
             }
+            continue;
+        }
+        if (argument == "--demo-plugin" && i + 1 < argc) {
+            options.demo_plugin = argv[++i];
+            continue;
+        }
+        if (argument == "--demo-passkey" && i + 1 < argc) {
+            options.demo_passkey = argv[++i];
+            if (options.demo_passkey != "phone" && options.demo_passkey != "local" &&
+                options.demo_passkey != "confirming" && options.demo_passkey != "none") {
+                pk::log::error("invalid --demo-passkey: %s", options.demo_passkey.c_str());
+                return 2;
+            }
+            continue;
+        }
+        if (argument == "--demo-debug") {
+            options.demo_debug = true;
+            continue;
+        }
+        if (argument == "--dump-targets") {
+            options.dump_targets = true;
+            continue;
+        }
+        if (argument == "--echo-cancellation" && i + 1 < argc) {
+            options.echo_cancellation = argv[++i];
+            continue;
+        }
+        if (argument == "--input-script" && i + 1 < argc) {
+            std::string spec = argv[++i];
+            if (spec.empty() || (spec.front() != '[' && spec.front() != '{')) {
+                std::ifstream input(spec);
+                if (!input) {
+                    pk::log::error("cannot open input script: %s", spec.c_str());
+                    return 2;
+                }
+                std::stringstream buffer;
+                buffer << input.rdbuf();
+                spec = buffer.str();
+            }
+            std::string script_error;
+            if (!pk::parse_input_script(spec, &options.input_script, &script_error)) {
+                pk::log::error("input script: %s", script_error.c_str());
+                return 2;
+            }
+            options.exit_after_script = true;
             continue;
         }
         if (argument == "--audio" && i + 1 < argc) {

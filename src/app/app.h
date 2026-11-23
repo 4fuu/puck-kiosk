@@ -1,8 +1,10 @@
 #pragma once
 
+#include "app/ui_input.h"
 #include "platform/platform.h"
 
 #include <string>
+#include <vector>
 
 namespace pk {
 
@@ -24,6 +26,16 @@ struct AppOptions {
 
     std::string demo_media;
     int demo_media_index = 0;
+
+    std::string demo_plugin;
+    std::string demo_passkey;
+    bool demo_debug = false;
+
+    std::vector<ScriptedInput> input_script;
+    bool exit_after_script = false;
+    bool dump_targets = false;
+
+    std::string echo_cancellation = "on";
 
     bool voice_loopback = false;
     int voice_loopback_seconds = 5;

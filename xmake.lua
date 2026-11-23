@@ -97,6 +97,17 @@ target("media-tests")
     add_links("m", "pthread", "png", "webp", "jpeg")
     set_warnings("all", "extra")
 
+target("ui-tests")
+    set_kind("binary")
+    set_default(false)
+    set_rundir("$(projectdir)")
+    add_files("tests/ui_tests.cpp", "src/app/car_ui.cpp", "src/app/ui_input.cpp",
+              "src/app/plugin_ui.cpp", "src/app/passkey.cpp", "src/app/diagnostics.cpp",
+              "src/app/media_overlay.cpp", "src/core/log.cpp")
+    add_includedirs("src", "third_party")
+    add_links("m", "pthread", "png", "webp", "jpeg")
+    set_warnings("all", "extra")
+
 target("voice-tests")
     set_kind("binary")
     set_default(false)

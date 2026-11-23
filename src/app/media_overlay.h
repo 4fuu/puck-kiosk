@@ -34,6 +34,16 @@ struct MediaPresentation {
     std::vector<MediaItem> items;
 };
 
+// The overlay's hit rects, shared by draw() and the car UI's hit map.
+struct MediaButtons {
+    Rect close;
+    Rect previous;
+    Rect next;
+    bool navigation = false;
+    bool can_previous = false;
+    bool can_next = false;
+};
+
 // The full-stage media overlay from the car page. The actor sends a nullable
 // presentation; this class owns its lifecycle, fetches each picture with the
 // session cookie, decodes off the UI thread, and keeps at most a few decoded
@@ -62,6 +72,7 @@ public:
     // frame on the UI thread, before draw().
     void poll();
     void draw(Canvas& canvas, Rect stage) const;
+    MediaButtons buttons(Canvas& canvas, Rect stage) const;
 
     bool visible() const;
     bool settled() const;
