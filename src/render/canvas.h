@@ -30,8 +30,9 @@ public:
     // Makes every drawing call issued so far visible without ending the frame.
     // A renderer that draws with raw GL between 2D calls can flush here, so the
     // 3D pass lands over the background and later 2D drawing lands over it.
-    // Backends that batch may end and restart their frame; the default is a
-    // no-op for backends that draw immediately.
+    // Drawing state does not survive a flush: backends reset to default, and
+    // callers set their state on every call. The default is a no-op for
+    // backends that draw immediately.
     virtual void flush() {}
 
     // Takes straight-alpha RGBA8 pixels. The caller owns the handle and must

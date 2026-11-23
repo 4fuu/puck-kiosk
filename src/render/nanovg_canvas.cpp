@@ -90,14 +90,10 @@ void NanoVgCanvas::flush() {
     if (!context_ || !frame_open_) {
         return;
     }
-    // End the frame to submit the queued 2D geometry, then start a fresh one
-    // and restore the caller's drawing state. nvgBeginFrame pushes its own
-    // state before resetting, so the two restores leave the stack as it was.
-    nvgSave(context_);
+    // End the frame to submit the queued 2D geometry, then start a fresh one.
+    // Drawing state resets to default; every Canvas call sets its own state.
     nvgEndFrame(context_);
     nvgBeginFrame(context_, static_cast<float>(size_.width), static_cast<float>(size_.height), dpi_scale_);
-    nvgRestore(context_);
-    nvgRestore(context_);
 }
 
 ImageHandle NanoVgCanvas::create_image(const std::uint8_t* rgba, int width, int height) {
