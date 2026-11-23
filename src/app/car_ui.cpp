@@ -8,52 +8,58 @@
 namespace pk {
 namespace {
 
-void draw_finder(Canvas& canvas, Rect qr, int modules, int origin_x, int origin_y) {
-    const float cell = qr.w / static_cast<float>(modules);
-    const auto block = [&](int x, int y, int w, int h, Color color) {
-        canvas.fill_rect(Rect{qr.x + x * cell, qr.y + y * cell, w * cell, h * cell}, color);
-    };
-    block(origin_x, origin_y, 7, 7, hex(0x0b0d0b));
-    block(origin_x + 1, origin_y + 1, 5, 5, hex(0xffffff));
-    block(origin_x + 2, origin_y + 2, 3, 3, hex(0x0b0d0b));
-}
+constexpr int kQuietZoneModules = 4;
 
-// M0 uses a deterministic placeholder pattern. The real QR encoder lands in
-// M1 together with the pairing poll, so the layout can be checked now.
-void draw_qr_placeholder(Canvas& canvas, Rect card) {
+void draw_qr(Canvas& canvas, Rect card, const QrCode& qr) {
     const float radius = card.w * 0.09f;
-    canvas.fill_rounded_rect(Rect{card.x - 4.0f, card.y - 4.0f, card.w + 8.0f, card.h + 8.0f}, radius + 4.0f,
-                             hex(0xffffff, 0.06f));
+    canvas.fill_rounded_rect(Rect{card.x - 4.0f, card.y - 4.0f, card.w + 8.0f, card.h + 8.0f},
+                             radius + 4.0f, hex(0xffffff, 0.06f));
     canvas.fill_rounded_rect(card, radius, hex(0xffffff));
 
-    const float padding = card.w * 0.075f;
-    const Rect qr{card.x + padding, card.y + padding, card.w - padding * 2.0f, card.h - padding * 2.0f};
-    constexpr int modules = 25;
-    const float cell = qr.w / static_cast<float>(modules);
+    const int total_modules = qr.size + kQuietZoneModules * 2;
+    const float cell = std::min(card.w, card.h) / static_cast<float>(total_modules + 2);
+    const float extent = cell * static_cast<float>(total_modules);
+    const float origin_x = card.center_x() - extent * 0.5f;
+    const float origin_y = card.center_y() - extent * 0.5f;
+    const Color dark = hex(0x0b0d0b);
 
-    for (int y = 0; y < modules; ++y) {
-        for (int x = 0; x < modules; ++x) {
-            const std::uint32_t hash = (static_cast<std::uint32_t>(x) * 73856093u) ^
-                                       (static_cast<std::uint32_t>(y) * 19349663u) ^ 0x9e3779b9u;
-            if (((hash >> 7) & 1u) == 0u) {
+    for (int y = 0; y < qr.size; ++y) {
+        for (int x = 0; x < qr.size; ++x) {
+            if (!qr.dark(x, y)) {
                 continue;
             }
-            canvas.fill_rect(Rect{qr.x + x * cell, qr.y + y * cell, cell + 0.4f, cell + 0.4f}, hex(0x0b0d0b));
+            canvas.fill_rect(Rect{origin_x + (x + kQuietZoneModules) * cell,
+                                  origin_y + (y + kQuietZoneModules) * cell, cell + 0.4f, cell + 0.4f},
+                             dark);
         }
     }
+}
 
-    draw_finder(canvas, qr, modules, 0, 0);
-    draw_finder(canvas, qr, modules, modules - 7, 0);
-    draw_finder(canvas, qr, modules, 0, modules - 7);
+// Normal render mode has no pairing challenge, so show an honest placeholder
+// instead of a QR-shaped pattern that cannot be scanned.
+void draw_placeholder(Canvas& canvas, Rect card) {
+    const float radius = card.w * 0.09f;
+    canvas.fill_rounded_rect(Rect{card.x - 4.0f, card.y - 4.0f, card.w + 8.0f, card.h + 8.0f},
+                             radius + 4.0f, hex(0xffffff, 0.06f));
+    canvas.fill_rounded_rect(card, radius, hex(0xffffff));
 
-    const float logo = qr.w * 0.26f;
-    const Rect logo_rect{qr.center_x() - logo * 0.5f, qr.center_y() - logo * 0.5f, logo, logo};
-    canvas.fill_rounded_rect(logo_rect, logo * 0.22f, hex(0x0b0d0b));
-    canvas.text(logo_rect.center_x(), logo_rect.center_y() + 1.0f, logo * 0.19f, hex(0xffffff),
-                TextAlign::Center, "puck");
+    const float box = card.w * 0.32f;
+    const Rect inner{card.center_x() - box * 0.5f, card.center_y() - box * 0.5f, box, box};
+    canvas.fill_rounded_rect(inner, box * 0.12f, hex(0x0b0d0b, 0.08f));
+    canvas.text(inner.center_x(), inner.center_y() + 1.0f, box * 0.22f, hex(0x9ca49c),
+                TextAlign::Center, "QR");
+    canvas.text(card.center_x(), card.y + card.h - 26.0f, 16.0f, hex(0x9ca49c), TextAlign::Center,
+                "run with --pair");
 }
 
 }  // namespace
+
+void CarUi::set_pairing(const QrCode& qr, std::string title, std::string status, std::string code) {
+    qr_ = qr;
+    title_ = std::move(title);
+    status_ = std::move(status);
+    code_ = std::move(code);
+}
 
 void CarUi::draw(Canvas& canvas, Size size, float time_seconds) {
     const bool portrait = size.height > size.width;
@@ -81,17 +87,33 @@ void CarUi::draw(Canvas& canvas, Size size, float time_seconds) {
     const Color foreground = hex(0xf6fff5);
     const Color muted = hex(0x9ca49c);
 
-    const float title_size = portrait ? 40.0f : 46.0f;
+    float title_size = portrait ? 40.0f : 46.0f;
+    while (title_size > 22.0f && canvas.measure_text(title_size, title_) > panel.w * 0.9f) {
+        title_size -= 2.0f;
+    }
     const float title_y = panel.y + (portrait ? 64.0f : panel.h * 0.26f);
-    canvas.text(panel.center_x(), title_y, title_size, foreground, TextAlign::Center, "Call Puck");
+    canvas.text(panel.center_x(), title_y, title_size, foreground, TextAlign::Center, title_);
 
     float qr_size = std::min(panel.w * 0.52f, panel.h * 0.46f);
-    qr_size = std::min(qr_size, 240.0f);
+    qr_size = std::min(qr_size, 300.0f);
     const Rect card{panel.center_x() - qr_size * 0.5f, title_y + title_size * 0.80f, qr_size, qr_size};
-    draw_qr_placeholder(canvas, card);
 
-    canvas.text(panel.center_x(), card.y + card.h + 30.0f, 20.0f, muted, TextAlign::Center,
-                "Or Sign In Manually");
+    if (qr_.empty()) {
+        draw_placeholder(canvas, card);
+    } else {
+        draw_qr(canvas, card, qr_);
+    }
+
+    const float below_card = card.y + card.h;
+    if (!code_.empty()) {
+        canvas.text(panel.center_x(), below_card + 26.0f, 20.0f, muted, TextAlign::Center, status_);
+        canvas.text(panel.center_x(), below_card + 68.0f, 44.0f, foreground, TextAlign::Center, code_);
+    } else if (!status_.empty()) {
+        canvas.text(panel.center_x(), below_card + 30.0f, 20.0f, muted, TextAlign::Center, status_);
+    } else {
+        canvas.text(panel.center_x(), below_card + 30.0f, 20.0f, muted, TextAlign::Center,
+                    "Or Sign In Manually");
+    }
 
     canvas.text(28.0f, 30.0f, 18.0f, muted, TextAlign::Left, "puck-kiosk");
 }

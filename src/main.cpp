@@ -22,6 +22,9 @@ void print_help(const char* program) {
               << "  --out <path>            PPM output for the last headless frame\n"
               << "  --font <path>           TTF/OTF font used by the 2D canvas\n"
               << "  --no-3d                 Force the 2D Puck renderer\n"
+              << "  --pair                  Pair with a phone, render the QR, then connect the actor\n"
+              << "  --pair-timeout <s>      Seconds to wait for phone approval (default 600)\n"
+              << "  --actor-seconds <s>     Seconds to log actor messages after pairing (default 60)\n"
               << "  -h, --help              Show this help\n";
 }
 
@@ -32,6 +35,19 @@ bool parse_int(const char* value, int* out) {
     char* end = nullptr;
     const long parsed = std::strtol(value, &end, 10);
     if (end == value || *end != '\0' || parsed <= 0 || parsed > 100000) {
+        return false;
+    }
+    *out = static_cast<int>(parsed);
+    return true;
+}
+
+bool parse_nonnegative_int(const char* value, int* out) {
+    if (!value || *value == '\0') {
+        return false;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed < 0 || parsed > 100000) {
         return false;
     }
     *out = static_cast<int>(parsed);
@@ -62,6 +78,10 @@ int main(int argc, char** argv) {
             options.enable_3d = false;
             continue;
         }
+        if (argument == "--pair") {
+            options.pair = true;
+            continue;
+        }
         if (argument == "--platform" && i + 1 < argc) {
             options.platform.backend = argv[++i];
             continue;
@@ -89,6 +109,20 @@ int main(int argc, char** argv) {
         }
         if (argument == "--out" && i + 1 < argc) {
             options.platform.output_path = argv[++i];
+            continue;
+        }
+        if (argument == "--pair-timeout" && i + 1 < argc) {
+            if (!parse_int(argv[++i], &options.pair_timeout_seconds)) {
+                pk::log::error("invalid --pair-timeout");
+                return 2;
+            }
+            continue;
+        }
+        if (argument == "--actor-seconds" && i + 1 < argc) {
+            if (!parse_nonnegative_int(argv[++i], &options.actor_seconds)) {
+                pk::log::error("invalid --actor-seconds");
+                return 2;
+            }
             continue;
         }
         if (argument == "--font" && i + 1 < argc) {
