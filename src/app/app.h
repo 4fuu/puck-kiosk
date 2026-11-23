@@ -22,6 +22,9 @@ struct AppOptions {
     bool demo_call = false;
     std::string demo_call_state = "active";
 
+    std::string demo_media;
+    int demo_media_index = 0;
+
     bool voice_loopback = false;
     int voice_loopback_seconds = 5;
 

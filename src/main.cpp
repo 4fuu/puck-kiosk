@@ -34,6 +34,8 @@ void print_help(const char* program) {
               << "  --voice-aec-smoke       Run the AEC echo-return-loss smoke test and exit\n"
               << "  --demo-call             Render the call screen once and exit\n"
               << "  --demo-call-state <s>   connecting|active|speaking|thinking|muted|ended|failed\n"
+              << "  --demo-media <json|path> Render the media overlay once and exit; use null for closed\n"
+              << "  --demo-media-index <n>  Item to show in the media demo (default 0)\n"
               << "  --audio <name>          auto | file | null | alsa\n"
               << "  --voice-out <path>      WAV sink for decoded call audio\n"
               << "  --voice-capture <path>  WAV of the synthetic capture signal\n"
@@ -119,6 +121,17 @@ int main(int argc, char** argv) {
         }
         if (argument == "--demo-call-state" && i + 1 < argc) {
             options.demo_call_state = argv[++i];
+            continue;
+        }
+        if (argument == "--demo-media" && i + 1 < argc) {
+            options.demo_media = argv[++i];
+            continue;
+        }
+        if (argument == "--demo-media-index" && i + 1 < argc) {
+            if (!parse_nonnegative_int(argv[++i], &options.demo_media_index)) {
+                pk::log::error("invalid --demo-media-index");
+                return 2;
+            }
             continue;
         }
         if (argument == "--audio" && i + 1 < argc) {

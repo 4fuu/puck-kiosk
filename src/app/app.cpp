@@ -2,9 +2,11 @@
 
 #include "app/call_flow.h"
 #include "app/car_ui.h"
+#include "app/media_overlay.h"
 #include "app/pairing.h"
 #include "core/log.h"
 #include "platform/audio.h"
+#include "platform/http.h"
 #include "puck/puck_view.h"
 #include "render/renderer.h"
 #include "voice/aec.h"
@@ -15,8 +17,11 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <mutex>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -25,6 +30,33 @@ namespace pk {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+// Pairing renews the car session on the UI thread while the media worker
+// fetches pictures. The HttpClient seam is documented as sequential, so this
+// wrapper serializes both callers instead of changing a platform backend.
+class SerializedHttpClient final : public HttpClient {
+public:
+    explicit SerializedHttpClient(std::unique_ptr<HttpClient> inner) : inner_(std::move(inner)) {}
+
+    HttpResponse request(const HttpRequest& request, std::string* error) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return inner_->request(request, error);
+    }
+
+    std::string export_cookies() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return inner_->export_cookies();
+    }
+
+    void import_cookies(const std::string& cookies) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        inner_->import_cookies(cookies);
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::unique_ptr<HttpClient> inner_;
+};
 
 void log_actor_message(const std::string& text) {
     if (text.size() > 64 * 1024) {
@@ -155,7 +187,108 @@ CallView demo_call_view(const std::string& state) {
     return view;
 }
 
-int run_pairing(const AppOptions& options, Platform& platform, Renderer& renderer, CarUi& ui) {
+bool load_demo_media(const std::string& spec, MediaOverlay& media, std::string* error) {
+    if (spec == "null") {
+        media.close();
+        return true;
+    }
+    if (spec.empty()) {
+        *error = "empty demo media";
+        return false;
+    }
+
+    std::string text = spec;
+    if (spec.front() != '{' && spec.front() != '[') {
+        std::error_code code;
+        if (std::filesystem::is_regular_file(spec, code)) {
+            const std::string extension = std::filesystem::path(spec).extension().string();
+            if (extension == ".json") {
+                std::ifstream input(spec);
+                if (!input) {
+                    *error = "cannot open " + spec;
+                    return false;
+                }
+                std::stringstream buffer;
+                buffer << input.rdbuf();
+                text = buffer.str();
+            } else {
+                nlohmann::json presentation = {
+                    {"id", "demo"},
+                    {"title", "Generated picture"},
+                    {"items",
+                     nlohmann::json::array({{{"id", "demo-1"},
+                                             {"url", spec},
+                                             {"caption", "Generated picture"}}})},
+                };
+                return media.set_presentation(presentation, true, error);
+            }
+        } else if (std::filesystem::path(spec).extension() == ".json") {
+            *error = "cannot find " + spec;
+            return false;
+        } else {
+            // A missing local picture is intentional: it exercises the
+            // fetch-failure card without a live session.
+            nlohmann::json presentation = {
+                {"id", "demo"},
+                {"title", "Generated picture"},
+                {"items",
+                 nlohmann::json::array({{{"id", "demo-1"},
+                                         {"url", spec},
+                                         {"caption", "Generated picture"}}})},
+            };
+            return media.set_presentation(presentation, true, error);
+        }
+    }
+
+    const nlohmann::json parsed = nlohmann::json::parse(text, nullptr, false);
+    if (parsed.is_discarded()) {
+        *error = "demo media is not valid JSON";
+        return false;
+    }
+    if (parsed.is_object() && parsed.contains("presentation")) {
+        return media.set_presentation(parsed["presentation"], true, error);
+    }
+    return media.set_presentation(parsed, true, error);
+}
+
+int run_demo_media(const AppOptions& options, Platform& platform, Renderer& renderer, CarUi& ui,
+                   MediaOverlay& media) {
+    const CallView view = demo_call_view("active");
+    PuckVisual visual;
+    visual.listening = true;
+    visual.mouth = view.mouth;
+    ui.set_visual(visual);
+    ui.set_call(view);
+
+    std::string error;
+    if (!load_demo_media(options.demo_media, media, &error)) {
+        log::error("media demo: %s", error.c_str());
+        return 2;
+    }
+    media.set_index(options.demo_media_index);
+
+    const auto deadline = Clock::now() + std::chrono::seconds(10);
+    while (!media.settled() && Clock::now() < deadline) {
+        platform.display->make_current();
+        media.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    if (!media.settled()) {
+        log::warn("media demo: still loading after 10 seconds");
+    }
+
+    platform.display->make_current();
+    media.poll();
+    renderer.begin(platform.display->size(), platform.display->dpi_scale());
+    ui.draw(renderer.canvas(), platform.display->size(), 0.0f);
+    renderer.end();
+    platform.display->swap();
+    log::info("media demo: %s", media.status_text().c_str());
+    return 0;
+}
+
+int run_pairing(const AppOptions& options, Platform& platform, Renderer& renderer, CarUi& ui,
+                MediaOverlay& media) {
     if (!platform.http) {
         log::error("pairing requires an HTTP client");
         return 1;
@@ -198,6 +331,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
     const auto started = Clock::now();
     auto render = [&]() {
         platform.display->make_current();
+        media.poll();
         renderer.begin(platform.display->size(), platform.display->dpi_scale());
         const float elapsed = std::chrono::duration<float>(Clock::now() - started).count();
         ui.draw(renderer.canvas(), platform.display->size(), elapsed);
@@ -380,7 +514,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
     auto last_renew = Clock::now();
     const auto actor_deadline = Clock::now() + std::chrono::seconds(options.actor_seconds);
     while (Clock::now() < actor_deadline || (call && call->active())) {
-        if (Clock::now() - last_renew >= std::chrono::seconds(30)) {
+        if (Clock::now() - last_renew >= std::chrono::seconds(30) && !media.busy()) {
             last_renew = Clock::now();
             std::string renew_error;
             if (!pairing.establish_session(&renew_error)) {
@@ -401,7 +535,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         const double now = std::chrono::duration<double>(
                                std::chrono::system_clock::now().time_since_epoch())
                                .count();
-        if (token_exp > 0.0 && now >= token_exp - 45.0) {
+        if (token_exp > 0.0 && now >= token_exp - 45.0 && !media.busy()) {
             std::string token_error;
             if (pairing.fetch_actor_token(&session, &token_error)) {
                 token_exp = ws_token_exp_seconds(session.ws_token);
@@ -433,6 +567,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
                 if (call) {
                     call->on_actor_message(message);
                 }
+                media.on_actor_message(message);
             }
         } else {
             if (!websocket->is_open()) {
@@ -454,11 +589,13 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
             }
             if (call->ended() || call->failed()) {
                 call_failed = call->failed();
+                media.close();
                 break;
             }
         }
     }
 
+    media.close();
     if (call && !call->ended() && !call->failed()) {
         final_stats = voice_engine->stats();
         call->end("actor observation finished");
@@ -518,15 +655,18 @@ int App::run(const AppOptions& options) {
 
     std::string error;
     PlatformOptions platform_options = options.platform;
-    if (options.pair || options.demo_call) {
-        // Pairing writes a snapshot after each state change, and the demo call
-        // is a single frame; a larger counter would suppress those writes.
+    if (options.pair || options.demo_call || !options.demo_media.empty()) {
+        // Pairing writes a snapshot after each state change, and the demos are
+        // a single frame; a larger counter would suppress those writes.
         platform_options.frames = 1;
     }
     auto platform = create_platform(platform_options, &error);
     if (!platform) {
         log::error("%s", error.c_str());
         return 1;
+    }
+    if (platform->http) {
+        platform->http = std::make_unique<SerializedHttpClient>(std::move(platform->http));
     }
 
     if (!platform->display->initialize(&error)) {
@@ -545,6 +685,11 @@ int App::run(const AppOptions& options) {
     log::info("Puck renderer: %s", puck->name());
 
     CarUi ui(*puck);
+    MediaOverlay media(platform->http.get(), PairingOptions{}.origin, renderer.canvas());
+    ui.set_media(&media);
+    if (!options.demo_media.empty()) {
+        return run_demo_media(options, *platform, renderer, ui, media);
+    }
     if (options.demo_call) {
         const CallView view = demo_call_view(options.demo_call_state);
         PuckVisual visual;
@@ -556,6 +701,7 @@ int App::run(const AppOptions& options) {
         ui.set_visual(visual);
         ui.set_call(view);
         platform->display->make_current();
+        media.poll();
         renderer.begin(platform->display->size(), platform->display->dpi_scale());
         ui.draw(renderer.canvas(), platform->display->size(), 0.0f);
         renderer.end();
@@ -563,7 +709,7 @@ int App::run(const AppOptions& options) {
         return 0;
     }
     if (options.pair) {
-        return run_pairing(options, *platform, renderer, ui);
+        return run_pairing(options, *platform, renderer, ui, media);
     }
 
     const auto started = std::chrono::steady_clock::now();
@@ -581,6 +727,7 @@ int App::run(const AppOptions& options) {
         }
 
         platform->display->make_current();
+        media.poll();
         renderer.begin(platform->display->size(), platform->display->dpi_scale());
         const float elapsed =
             std::chrono::duration<float>(std::chrono::steady_clock::now() - started).count();

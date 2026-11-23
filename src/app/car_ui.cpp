@@ -1,5 +1,6 @@
 #include "app/car_ui.h"
 
+#include "app/media_overlay.h"
 #include "puck/puck_view.h"
 
 #include <algorithm>
@@ -239,6 +240,15 @@ void CarUi::draw_call(Canvas& canvas, Size size, float time_seconds) {
                     TextAlign::Center, "Setting up the voice channel");
     }
 
+    draw_status_dot(canvas, width - 150.0f, 30.0f, call_.phase);
+    canvas.text(width - 28.0f, 30.0f, 16.0f, muted_text, TextAlign::Right,
+                ended ? "Call ended" : failed ? "Call failed" : connecting ? "Connecting" : "Connected");
+    canvas.text(28.0f, 30.0f, 18.0f, muted_text, TextAlign::Left, "puck-kiosk");
+
+    if (media_ && media_->visible()) {
+        media_->draw(canvas, Rect{0.0f, 0.0f, width, stage_height});
+    }
+
     const float controls_y = height - (portrait ? 116.0f : 108.0f);
     const float button_height = portrait ? 76.0f : 72.0f;
     const float button_width = std::min(width * 0.34f, 260.0f);
@@ -266,11 +276,6 @@ void CarUi::draw_call(Canvas& canvas, Size size, float time_seconds) {
         }
         draw_pill(canvas, end_button, hex(0xd6453f), hex(0xfff7f6), "End", 26.0f);
     }
-
-    draw_status_dot(canvas, width - 150.0f, 30.0f, call_.phase);
-    canvas.text(width - 28.0f, 30.0f, 16.0f, muted_text, TextAlign::Right,
-                ended ? "Call ended" : failed ? "Call failed" : connecting ? "Connecting" : "Connected");
-    canvas.text(28.0f, 30.0f, 18.0f, muted_text, TextAlign::Left, "puck-kiosk");
 }
 
 }  // namespace pk

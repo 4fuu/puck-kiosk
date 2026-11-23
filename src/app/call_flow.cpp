@@ -204,8 +204,6 @@ void CallController::handle_actor_object(const nlohmann::json& message) {
             handle_transcript(params);
         } else if (method == "client_puck_voice_start" && params.is_object()) {
             handle_answer(params);
-        } else if (method == "puck_media_presentation") {
-            log::info("voice: puck_media_presentation is not part of M3");
         }
         return;
     }
@@ -224,8 +222,6 @@ void CallController::handle_actor_object(const nlohmann::json& message) {
             handle_voice_state(*payload);
         } else if (type == "puck_voice_transcript") {
             handle_transcript(*payload);
-        } else if (type == "puck_media_presentation") {
-            log::info("voice: puck_media_presentation is not part of M3");
         }
     }
 }

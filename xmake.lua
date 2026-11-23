@@ -64,7 +64,8 @@ target("puck-kiosk")
             add_defines("PUCK_KIOSK_HAVE_LIBINPUT=1")
         end
     end
-    add_links("EGL", "GLESv2", "m", "dl", "pthread", "png", "webp", "curl", "qrencode", "ssl", "crypto")
+    add_links("EGL", "GLESv2", "m", "dl", "pthread", "png", "webp", "jpeg", "curl", "qrencode", "ssl",
+              "crypto")
     add_defines("PUCK_KIOSK_BACKEND_" .. backend:upper() .. "=1")
     add_defines("PUCK_KIOSK_ENABLE_AEC=1")
     add_defines("PUCK_KIOSK_ENABLE_ALSA=1")
@@ -85,6 +86,15 @@ target("puck-tests")
     add_files("src/puck/puck_v2.cpp", "src/puck/puck_rig.cpp", "src/puck/puck_3d_pose.cpp")
     add_includedirs("src", "third_party")
     add_links("m")
+    set_warnings("all", "extra")
+
+target("media-tests")
+    set_kind("binary")
+    set_default(false)
+    set_rundir("$(projectdir)")
+    add_files("tests/media_tests.cpp", "src/app/media_overlay.cpp", "src/core/log.cpp")
+    add_includedirs("src", "third_party")
+    add_links("m", "pthread", "png", "webp", "jpeg")
     set_warnings("all", "extra")
 
 target("voice-tests")

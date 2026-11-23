@@ -8,6 +8,7 @@
 
 namespace pk {
 
+class MediaOverlay;
 class PuckView;
 
 class CarUi {
@@ -17,6 +18,7 @@ public:
     void set_visual(const PuckVisual& visual) { visual_ = visual; }
     void set_pairing(const QrCode& qr, std::string title, std::string status, std::string code = {});
     void set_call(const CallView& view);
+    void set_media(MediaOverlay* media) { media_ = media; }
     void draw(Canvas& canvas, Size size, float time_seconds);
 
 private:
@@ -24,6 +26,7 @@ private:
     void draw_call(Canvas& canvas, Size size, float time_seconds);
 
     PuckView& puck_;
+    MediaOverlay* media_ = nullptr;
     PuckVisual visual_;
     QrCode qr_;
     std::string title_ = "Call Puck";
