@@ -164,14 +164,32 @@ void draw_round_button(Canvas& canvas, float center_x, float center_y, float dia
 }
 
 void draw_call_icon(Canvas& canvas, float center_x, float center_y, float size, Color color) {
-    canvas.stroke_line(center_x - 0.21f * size, center_y - 0.21f * size,
-                       center_x + 0.21f * size, center_y + 0.21f * size, 0.16f * size, color);
-    canvas.fill_rounded_rect(Rect{center_x - 0.44f * size, center_y - 0.46f * size,
-                                  0.26f * size, 0.38f * size},
-                             0.11f * size, color);
-    canvas.fill_rounded_rect(Rect{center_x + 0.18f * size, center_y + 0.08f * size,
-                                  0.38f * size, 0.26f * size},
-                             0.11f * size, color);
+    // A curved handset (phone.fill): an arc band with flared earpiece pads,
+    // rotated 45 degrees so the earpiece sits top-left.
+    const float rotation = 0.7853981634f;
+    const float cos_r = std::cos(rotation);
+    const float sin_r = std::sin(rotation);
+    const auto place = [&](float x, float y, float* out_x, float* out_y) {
+        *out_x = center_x + x * cos_r - y * sin_r;
+        *out_y = center_y + x * sin_r + y * cos_r;
+    };
+    const float arc_cy = -0.55f * size;
+    const float radius = 0.62f * size;
+    const float half = 0.085f * size;
+    const float start = 0.349066f;  // 20 degrees
+    const float end = 2.792527f;    // 160 degrees
+    constexpr int kSegments = 48;
+    for (int i = 0; i <= kSegments; ++i) {
+        const float angle = start + (end - start) * (static_cast<float>(i) / kSegments);
+        const float dx = std::cos(angle);
+        const float dy = std::sin(angle);
+        float x, y;
+        place(dx * radius, arc_cy + dy * radius, &x, &y);
+        canvas.fill_circle(x, y, half, color);
+        if (i == 0 || i == kSegments) {
+            canvas.fill_circle(x, y, 0.155f * size, color);
+        }
+    }
 }
 
 void draw_end_icon(Canvas& canvas, float center_x, float center_y, float size, Color color) {
