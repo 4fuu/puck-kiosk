@@ -37,6 +37,19 @@ void log_actor_message(const std::string& text) {
         log::info("actor <- %s", redact_text(text, 300).c_str());
         return;
     }
+    if (parsed.is_array()) {
+        std::string types;
+        for (const auto& entry : parsed) {
+            if (entry.contains("type") && entry["type"].is_string()) {
+                if (!types.empty()) {
+                    types += ",";
+                }
+                types += entry["type"].get<std::string>();
+            }
+        }
+        log::info("actor <- batch of %zu [%s]", parsed.size(), types.c_str());
+        return;
+    }
     if (parsed.contains("method") && parsed["method"].is_string()) {
         const std::string method = parsed["method"].get<std::string>();
         const std::string params =
@@ -204,23 +217,42 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         log::warn("actor ready check: %s", redact_text(ready_error).c_str());
     }
 
-    ActorEndpoint endpoint;
-    if (!build_actor_endpoint(session, page_load_id, &endpoint, &error)) {
-        log::error("actor endpoint: %s", error.c_str());
-        return 2;
-    }
-
-    log::info("actor: connecting to %s", endpoint.display_url.c_str());
     const std::vector<HttpHeader> headers = {
         {"Origin", pairing.origin()},
         {"User-Agent", "puck-kiosk/0.1"},
     };
-    auto websocket =
-        platform.websockets->connect(endpoint.url, headers, endpoint.subprotocols, &error);
-    if (!websocket) {
-        log::error("actor connect: %s", redact_text(error).c_str());
+    int resume_id = 0;
+    auto connect_actor = [&](std::unique_ptr<WebSocket>* out) {
+        ActorEndpoint endpoint;
+        if (!build_actor_endpoint(session, page_load_id, &endpoint, &error)) {
+            log::error("actor endpoint: %s", error.c_str());
+            return false;
+        }
+        log::info("actor: connecting to %s", endpoint.display_url.c_str());
+        auto socket =
+            platform.websockets->connect(endpoint.url, headers, endpoint.subprotocols, &error);
+        if (!socket) {
+            log::error("actor connect: %s", redact_text(error).c_str());
+            return false;
+        }
+        // The actor only starts pushing after the client resumes its observer
+        // session; version 0 asks for the full snapshot.
+        const std::string resume = nlohmann::json{
+            {"jsonrpc", "2.0"},
+            {"id", "puck-kiosk-" + std::to_string(resume_id++)},
+            {"method", "client_resume"},
+            {"params", {{"version", 0}}},
+        }.dump();
+        socket->send_text(resume);
+        *out = std::move(socket);
+        return true;
+    };
+
+    std::unique_ptr<WebSocket> websocket;
+    if (!connect_actor(&websocket)) {
         return 2;
     }
+    double token_exp = ws_token_exp_seconds(session.ws_token);
 
     log::info("actor: connected; observing for %d seconds", options.actor_seconds);
     int message_count = 0;
@@ -233,6 +265,31 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
             std::string renew_error;
             if (!pairing.establish_session(&renew_error)) {
                 log::warn("car session renew: %s", redact_text(renew_error).c_str());
+            } else {
+                // The session cookie rotates on every renew; keep the stored
+                // copy current or the next process resumes with a dead cookie.
+                std::string persist_error;
+                if (!pairing.persist(session, &persist_error)) {
+                    log::warn("cannot persist renewed session: %s",
+                              redact_text(persist_error).c_str());
+                }
+            }
+        }
+        const double now = std::chrono::duration<double>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+        if (token_exp > 0.0 && now >= token_exp - 45.0) {
+            std::string token_error;
+            if (pairing.fetch_actor_token(&session, &token_error)) {
+                token_exp = ws_token_exp_seconds(session.ws_token);
+                websocket->close();
+                if (!connect_actor(&websocket)) {
+                    break;
+                }
+                log::info("actor: reconnected with a refreshed token");
+            } else {
+                log::warn("actor token refresh: %s", redact_text(token_error).c_str());
+                token_exp = 0.0;
             }
         }
         if (websocket->is_open() && Clock::now() - last_ping >= std::chrono::seconds(30)) {

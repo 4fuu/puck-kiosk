@@ -3,6 +3,7 @@
 #include "core/log.h"
 
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <qrencode.h>
@@ -18,6 +19,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_set>
+#include <vector>
 
 namespace pk {
 namespace {
@@ -1173,6 +1175,37 @@ bool wait_actor_ready(HttpClient& http, const CarSession& session, const std::st
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     return false;
+}
+
+double ws_token_exp_seconds(const std::string& token) {
+    const auto first = token.find('.');
+    const auto second = token.find('.', first == std::string::npos ? 0 : first + 1);
+    if (first == std::string::npos || second == std::string::npos) {
+        return 0.0;
+    }
+    std::string payload = token.substr(first + 1, second - first - 1);
+    for (char& character : payload) {
+        if (character == '-') {
+            character = '+';
+        } else if (character == '_') {
+            character = '/';
+        }
+    }
+    while (payload.size() % 4 != 0) {
+        payload.push_back('=');
+    }
+    std::vector<unsigned char> decoded(payload.size());
+    const int length = EVP_DecodeBlock(decoded.data(),
+                                       reinterpret_cast<const unsigned char*>(payload.data()),
+                                       static_cast<int>(payload.size()));
+    if (length <= 0) {
+        return 0.0;
+    }
+    const auto json = nlohmann::json::parse(decoded.begin(), decoded.begin() + length, nullptr, false);
+    if (json.is_discarded() || !json.contains("exp") || !json["exp"].is_number()) {
+        return 0.0;
+    }
+    return json["exp"].get<double>();
 }
 
 std::string redact_url(const std::string& url) {

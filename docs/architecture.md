@@ -163,6 +163,13 @@ Actor transport facts verified against the live service:
   with the same `rvt-*` query and `Authorization: <wsToken>`; ready means
   status < 500 and no `x-rivet-error` header. Only then does the actor push
   `observerSnapshot` and further notifications.
+- The actor pushes nothing until the client sends a `client_resume` JSON-RPC
+  request (`params: { version }`, 0 for a full snapshot). Replies and event
+  batches arrive as text frames; a batch is a JSON array of typed events.
+- The wsToken lives about 180 seconds; refresh it via `/api/thread-actors`
+  before expiry and reconnect the WebSocket with the new conn params.
+- The car session cookie rotates on every `/api/car/session` call; persist
+  the exported cookie jar after each renew, not only after pairing.
 
 ## Voice stack (M3 decision)
 
