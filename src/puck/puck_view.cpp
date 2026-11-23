@@ -21,7 +21,12 @@ std::unique_ptr<PuckView> create_puck_view(bool enable_3d) {
 #else
     (void)enable_3d;
 #endif
-    return std::make_unique<Puck2D>();
+    auto puck = std::make_unique<Puck2D>();
+    std::string error;
+    if (!puck->initialize(&error)) {
+        log::info("%s; using the 2D placeholder", error.c_str());
+    }
+    return puck;
 }
 
 }  // namespace pk

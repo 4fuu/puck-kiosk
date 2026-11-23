@@ -14,6 +14,10 @@ public:
     void begin_frame(Size size, float dpi_scale) override;
     void end_frame() override;
 
+    ImageHandle create_image(const std::uint8_t* rgba, int width, int height) override;
+    void draw_image(ImageHandle image, Rect rect, float alpha) override;
+    void release_image(ImageHandle image) override;
+
     void clear(Color color) override;
     void fill_rect(Rect rect, Color color) override;
     void fill_rounded_rect(Rect rect, float radius, Color color) override;

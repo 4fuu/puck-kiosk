@@ -33,7 +33,7 @@ target("puck-kiosk")
     add_deps("nanovg")
     add_files("src/**.cpp")
     add_includedirs("src", "third_party")
-    add_links("EGL", "GLESv2", "m", "dl", "pthread")
+    add_links("EGL", "GLESv2", "m", "dl", "pthread", "png", "webp")
     add_defines("PUCK_KIOSK_BACKEND_" .. backend:upper() .. "=1")
     if puck3d then
         add_defines("PUCK_KIOSK_ENABLE_3D=1")

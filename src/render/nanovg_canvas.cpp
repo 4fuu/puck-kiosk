@@ -85,6 +85,32 @@ void NanoVgCanvas::end_frame() {
     }
 }
 
+ImageHandle NanoVgCanvas::create_image(const std::uint8_t* rgba, int width, int height) {
+    if (!context_ || !rgba || width <= 0 || height <= 0) {
+        return kInvalidImage;
+    }
+    const int image = nvgCreateImageRGBA(context_, width, height, 0, rgba);
+    return image > 0 ? static_cast<ImageHandle>(image) : kInvalidImage;
+}
+
+void NanoVgCanvas::draw_image(ImageHandle image, Rect rect, float alpha) {
+    if (!context_ || image == kInvalidImage || rect.w <= 0.0f || rect.h <= 0.0f) {
+        return;
+    }
+    const NVGpaint paint = nvgImagePattern(context_, rect.x, rect.y, rect.w, rect.h, 0.0f,
+                                           static_cast<int>(image), alpha);
+    nvgBeginPath(context_);
+    nvgRect(context_, rect.x, rect.y, rect.w, rect.h);
+    nvgFillPaint(context_, paint);
+    nvgFill(context_);
+}
+
+void NanoVgCanvas::release_image(ImageHandle image) {
+    if (context_ && image != kInvalidImage) {
+        nvgDeleteImage(context_, static_cast<int>(image));
+    }
+}
+
 void NanoVgCanvas::clear(Color color) {
     fill_rect(Rect{0.0f, 0.0f, static_cast<float>(size_.width), static_cast<float>(size_.height)}, color);
 }
