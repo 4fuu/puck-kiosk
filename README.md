@@ -135,7 +135,7 @@ The code is MIT licensed. Third-party notices are in `third_party/nanovg/`.
   2D fallback on context/asset/shader failure.
 - **M2:** QR pairing + `claimDevicePairing` poll, session cookie, `/car` data,
   actor WebSocket JSON-RPC.
-- **M3:** WebRTC voice (GStreamer `webrtcbin` or libdatachannel), mute/end,
+- **M3:** WebRTC voice (libdatachannel + Opus + webrtc-audio-processing), mute/end,
   captions, `puck_media_presentation` image overlay.
 - **M4:** plugin option sheets, passkey-on-phone flow, diagnostics, DRM/KMS
   kiosk packaging, Buildroot/Yocto recipes.

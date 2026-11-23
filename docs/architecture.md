@@ -137,6 +137,31 @@ client creates a data channel named `puck-webrtc-voice` and sends
 `client_puck_voice_start` with `{ transport: { type: "webrtc", sdp } }`.
 The answer returns `{ sessionID, transport: { sdp } }`.
 
+## Voice stack (M3 decision)
+
+M3 uses libdatachannel + libopus + webrtc-audio-processing, not GStreamer
+webrtcbin. A two-peer Opus loopback benchmark (DTLS-SRTP, local ICE, 20 ms
+frames, 32 kbps mono, x86_64) measured peak RSS of 14.8-15.1 MB for this stack
+versus 31.4-32.0 MB for webrtcbin, 16.8-17.3 MB versus 36.9-37.3 MB with AEC
+enabled, and a 13-library runtime closure versus 62. Both options run the same
+AEC DSP (webrtc-audio-processing, measured 20.3 dB ERLE); webrtcdsp is only a
+GStreamer wrapper around it. libdatachannel callbacks are plain threads and
+fit the `AudioIO` seam without a GLib main loop, and its aarch64 static cross
+build is verified. The web client carries voice over a data channel named
+`puck-webrtc-voice`, which is libdatachannel's core feature.
+
+Costs accepted with this choice:
+
+- libdatachannel has no receive jitter buffer; M3 must implement one
+  (reordering, adaptive latency, NACK-driven retransmission), roughly 300-500
+  lines. This is the main schedule risk, not memory.
+- Pin libdatachannel v0.24.x (vendored or fetched); distros and Buildroot do
+  not package it. MPL-2.0 file-level copyleft: publish patches to MPL files.
+- libdatachannel does not embed ICE candidates in the SDP until gathering
+  completes. Either wait for gathering done before the one-shot SDP exchange
+  (the web client's pattern) or confirm the actor protocol carries candidate
+  messages; a naive early SDP exchange never connects.
+
 ## Memory budget (512 MB target)
 
 | Area | Budget |
@@ -145,7 +170,7 @@ The answer returns `{ sessionID, transport: { sdp } }`.
 | 2D Puck sprite + face | < 1 MB |
 | 3D Puck (one avatar, 512px textures) | 8–15 MB |
 | Media image cache (2–3 images) | 10–20 MB |
-| WebRTC/GStreamer + Opus | 20–40 MB |
+| WebRTC (libdatachannel + Opus + AEC) | 15–20 MB |
 | OS + network | remaining |
 
 The 3D renderer must release textures and mesh buffers when an avatar changes.
