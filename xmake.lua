@@ -5,7 +5,7 @@ set_encodings("utf-8")
 
 add_rules("mode.debug", "mode.release")
 
-add_requires("ixwebsocket", {configs = {ssl = "openssl", use_tls = true}})
+add_requires("ixwebsocket v12.1.0", {configs = {ssl = "openssl", use_tls = true}})
 add_requires("libdatachannel 0.24.6", {configs = {media = true}})
 add_requires("pkgconfig::webrtc-audio-processing-1")
 add_requires("pkgconfig::alsa")

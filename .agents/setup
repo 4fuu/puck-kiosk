@@ -6,7 +6,7 @@ cd "$repo_root"
 export PATH="$HOME/.local/bin:$PATH"
 
 step() {
-    printf '\n==> %s\n' "$*"
+    printf '\n==> [%3ds] %s\n' "$SECONDS" "$*"
 }
 
 step "xmake"
@@ -88,10 +88,10 @@ else
 fi
 
 step "configure and build (headless)"
-xmake f -y -m release --backend=headless >/dev/null
+xmake f -y -m release --backend=headless
 xmake build -y puck-kiosk
 
 step "headless smoke render"
 xmake run puck-kiosk --headless --frames 1 --out build/setup-smoke.ppm >/dev/null
 test -s build/setup-smoke.ppm
-echo "setup ok: $(du -h build/setup-smoke.ppm | cut -f1) $(pwd)/build/setup-smoke.ppm"
+echo "setup ok in ${SECONDS}s: $(du -h build/setup-smoke.ppm | cut -f1) $(pwd)/build/setup-smoke.ppm"
