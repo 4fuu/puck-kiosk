@@ -525,9 +525,21 @@ std::string header_value(const HttpResponse& response, const char* name) {
     return {};
 }
 
-std::string fit_text(Canvas& canvas, float size, const std::string& text, float max_width) {
+TextStyle text_style(float size, Color color, TextAlign align = TextAlign::Left,
+                     FontWeight weight = FontWeight::Regular, float tracking = 0.0f) {
+    TextStyle style;
+    style.size = size;
+    style.color = color;
+    style.align = align;
+    style.weight = weight;
+    style.tracking = tracking;
+    return style;
+}
+
+std::string fit_text(Canvas& canvas, const TextStyle& style, const std::string& text,
+                     float max_width) {
     if (max_width <= 0.0f || text.empty() ||
-        canvas.measure_text(size, text) <= max_width) {
+        canvas.measure_text(style, text) <= max_width) {
         return text;
     }
     std::string shortened = text;
@@ -538,14 +550,14 @@ std::string fit_text(Canvas& canvas, float size, const std::string& text, float 
             shortened.pop_back();
         }
         const std::string candidate = shortened + "...";
-        if (canvas.measure_text(size, candidate) <= max_width) {
+        if (canvas.measure_text(style, candidate) <= max_width) {
             return candidate;
         }
     }
     return {};
 }
 
-std::vector<std::string> wrap_text(Canvas& canvas, float size, const std::string& text,
+std::vector<std::string> wrap_text(Canvas& canvas, const TextStyle& style, const std::string& text,
                                    float max_width, int max_lines) {
     std::vector<std::string> lines;
     if (text.empty() || max_lines <= 0) {
@@ -558,7 +570,7 @@ std::vector<std::string> wrap_text(Canvas& canvas, float size, const std::string
         const std::string word =
             text.substr(index, space == std::string::npos ? std::string::npos : space - index);
         const std::string candidate = line.empty() ? word : line + " " + word;
-        if (!line.empty() && canvas.measure_text(size, candidate) > max_width) {
+        if (!line.empty() && canvas.measure_text(style, candidate) > max_width) {
             lines.push_back(line);
             line = word;
             if (static_cast<int>(lines.size()) >= max_lines) {
@@ -1127,50 +1139,52 @@ void MediaOverlay::log_state(const char* prefix) const {
 namespace {
 
 struct OverlayLayout {
-    float header_height = 0.0f;
-    float pad = 0.0f;
-    float title_size = 0.0f;
-    float close_size = 0.0f;
-    float close_height = 0.0f;
+    bool compact = false;
+    float header_height = 96.0f;
+    float pad = 40.0f;
+    float title_size = 30.0f;
+    float close_size = 24.0f;
+    float close_height = 80.0f;
     Rect close;
     Rect frame;
     Rect content;
-    float nav_radius = 0.0f;
-    float nav_margin = 0.0f;
+    float nav_radius = 48.0f;
+    float nav_margin = 24.0f;
+    float corner_radius = 16.0f;
     bool navigation = false;
     bool can_previous = false;
     bool can_next = false;
 };
 
 OverlayLayout overlay_layout(Canvas& canvas, Rect stage, const MediaPresentation& presentation,
-                             int index) {
+                             int index, bool compact) {
     OverlayLayout layout;
-    layout.header_height = std::clamp(stage.h * 0.185f, 56.0f, 96.0f);
-    layout.pad = std::clamp(stage.w * 0.03125f, 18.0f, 40.0f);
-    layout.title_size = std::clamp(stage.h * 0.058f, 18.0f, 30.0f);
-    layout.close_size = std::clamp(stage.h * 0.046f, 16.0f, 24.0f);
-    layout.close_height = std::clamp(layout.header_height * 0.83f, 44.0f, 80.0f);
-    const float close_padding = std::clamp(stage.w * 0.0375f, 20.0f, 48.0f);
+    layout.compact = compact;
+    layout.header_height = layout.compact ? 56.0f : 96.0f;
+    layout.pad = layout.compact ? 16.0f : 40.0f;
+    layout.title_size = layout.compact ? 20.0f : 30.0f;
+    layout.close_size = layout.compact ? 18.0f : 24.0f;
+    layout.close_height = layout.compact ? 48.0f : 80.0f;
+    const float close_padding = layout.compact ? 24.0f : 48.0f;
+    const TextStyle close_style =
+        text_style(layout.close_size, hex(0xf6fff5), TextAlign::Center, FontWeight::Medium);
     const float close_width =
-        canvas.measure_text(layout.close_size, "Close") + close_padding * 2.0f;
+        canvas.measure_text(close_style, "Close") + close_padding * 2.0f;
     layout.close = Rect{stage.x + stage.w - layout.pad - close_width,
                         stage.y + (layout.header_height - layout.close_height) * 0.5f,
                         close_width, layout.close_height};
+    const float frame_bottom = layout.compact ? 16.0f : 24.0f;
     layout.frame = Rect{stage.x + layout.pad, stage.y + layout.header_height,
                         stage.w - layout.pad * 2.0f,
-                        stage.h - layout.header_height - layout.pad * 0.5f};
+                        stage.h - layout.header_height - frame_bottom};
     layout.navigation = presentation.items.size() > 1;
-    layout.nav_radius = std::clamp(layout.frame.h * 0.10f, 28.0f, 48.0f);
-    layout.nav_margin = std::max(12.0f, layout.pad * 0.6f);
-    const float base_inset = std::min(layout.frame.w * 0.10f, 140.0f);
-    const float content_inset =
-        layout.navigation
-            ? std::max(base_inset, layout.nav_margin + layout.nav_radius * 2.0f + 8.0f)
-            : base_inset;
-    layout.content = Rect{layout.frame.x + content_inset,
-                          layout.frame.y + layout.pad * 0.25f,
-                          layout.frame.w - content_inset * 2.0f,
-                          layout.frame.h - layout.pad * 0.75f};
+    layout.nav_radius = layout.compact ? 28.0f : 48.0f;
+    layout.nav_margin = layout.compact ? 8.0f : 24.0f;
+    const float base_inset = layout.compact ? 16.0f : 128.0f;
+    const float nav_inset = layout.nav_margin + layout.nav_radius * 2.0f + 8.0f;
+    const float content_inset = layout.navigation ? std::max(base_inset, nav_inset) : base_inset;
+    layout.content = Rect{layout.frame.x + content_inset, layout.frame.y,
+                          layout.frame.w - content_inset * 2.0f, layout.frame.h};
     layout.can_previous = index > 0;
     layout.can_next = index + 1 < static_cast<int>(presentation.items.size());
     return layout;
@@ -1178,12 +1192,12 @@ OverlayLayout overlay_layout(Canvas& canvas, Rect stage, const MediaPresentation
 
 }  // namespace
 
-MediaButtons MediaOverlay::buttons(Canvas& canvas, Rect stage) const {
+MediaButtons MediaOverlay::buttons(Canvas& canvas, Rect stage, bool compact) const {
     MediaButtons buttons;
     if (!visible() || stage.w <= 0.0f || stage.h <= 0.0f) {
         return buttons;
     }
-    const OverlayLayout layout = overlay_layout(canvas, stage, *presentation_, index_);
+    const OverlayLayout layout = overlay_layout(canvas, stage, *presentation_, index_, compact);
     buttons.close = layout.close;
     buttons.navigation = layout.navigation;
     buttons.can_previous = layout.can_previous;
@@ -1201,7 +1215,7 @@ MediaButtons MediaOverlay::buttons(Canvas& canvas, Rect stage) const {
     return buttons;
 }
 
-void MediaOverlay::draw(Canvas& canvas, Rect stage) const {
+void MediaOverlay::draw(Canvas& canvas, Rect stage, bool compact) const {
     if (!visible() || stage.w <= 0.0f || stage.h <= 0.0f) {
         return;
     }
@@ -1213,13 +1227,14 @@ void MediaOverlay::draw(Canvas& canvas, Rect stage) const {
     const Color background = hex(0x0b0d0b);
     const Color foreground = hex(0xf6fff5);
     const Color muted = hex(0x9ca49c);
-    const Color secondary = hex(0x232b23);
+    const Color secondary = hex(0x2f372f);
     canvas.fill_rect(stage, background);
 
-    const OverlayLayout layout = overlay_layout(canvas, stage, *presentation_, index_);
+    const OverlayLayout layout = overlay_layout(canvas, stage, *presentation_, index_, compact);
+    const TextStyle close_style =
+        text_style(layout.close_size, foreground, TextAlign::Center, FontWeight::Medium);
     canvas.fill_rounded_rect(layout.close, layout.close_height * 0.5f, secondary);
-    canvas.text(layout.close.center_x(), layout.close.center_y() + layout.close_size * 0.36f,
-                layout.close_size, foreground, TextAlign::Center, "Close");
+    canvas.text(layout.close.center_x(), layout.close.center_y(), close_style, "Close");
 
     std::string title = presentation_->title;
     if (title.empty()) {
@@ -1228,13 +1243,13 @@ void MediaOverlay::draw(Canvas& canvas, Rect stage) const {
     if (title.empty()) {
         title = "Puck's image";
     }
+    const TextStyle title_style =
+        text_style(layout.title_size, foreground, TextAlign::Left, FontWeight::Medium);
     const float title_max = layout.close.x - layout.pad - (stage.x + layout.pad);
-    title = fit_text(canvas, layout.title_size, title, title_max);
-    canvas.text(stage.x + layout.pad, stage.y + layout.header_height * 0.5f, layout.title_size,
-                foreground, TextAlign::Left, title);
+    title = fit_text(canvas, title_style, title, title_max);
+    canvas.text(stage.x + layout.pad, stage.y + layout.header_height * 0.5f, title_style, title);
 
     const Rect& content = layout.content;
-
     const ImageHandle image = find_image(item->id);
     const std::size_t item_index =
         static_cast<std::size_t>(item - presentation_->items.data());
@@ -1250,26 +1265,37 @@ void MediaOverlay::draw(Canvas& canvas, Rect stage) const {
         }
     }
     if (image != kInvalidImage) {
-        canvas.draw_image(image, fit_rect(content, image_width, image_height), 1.0f);
+        const Rect image_rect = fit_rect(content, image_width, image_height);
+        canvas.draw_image(image, image_rect, 1.0f);
+        const float radius = layout.corner_radius;
+        canvas.fill_circle(image_rect.x, image_rect.y, radius, background);
+        canvas.fill_circle(image_rect.x + image_rect.w, image_rect.y, radius, background);
+        canvas.fill_circle(image_rect.x, image_rect.y + image_rect.h, radius, background);
+        canvas.fill_circle(image_rect.x + image_rect.w, image_rect.y + image_rect.h, radius,
+                           background);
     } else if (!error.empty()) {
         const float card_width = std::min(content.w * 0.72f, 640.0f);
         const float card_height = std::min(content.h * 0.52f, 240.0f);
         const Rect card{content.center_x() - card_width * 0.5f,
                         content.center_y() - card_height * 0.5f, card_width, card_height};
-        canvas.fill_rounded_rect(card, 18.0f, hex(0x1a211a));
-        const std::string heading = item->caption.empty() ? "Could not load the picture" : item->caption;
-        canvas.text(card.center_x(), card.y + card.h * 0.34f, 24.0f, foreground,
-                    TextAlign::Center, fit_text(canvas, 24.0f, heading, card.w * 0.86f));
+        canvas.fill_rounded_rect(card, layout.corner_radius, hex(0x1a211a));
+        const TextStyle heading_style =
+            text_style(24.0f, foreground, TextAlign::Center, FontWeight::Medium);
+        const std::string heading =
+            item->caption.empty() ? "Could not load the picture" : item->caption;
+        canvas.text(card.center_x(), card.y + card.h * 0.34f, heading_style,
+                    fit_text(canvas, heading_style, heading, card.w * 0.86f));
+        const TextStyle error_style = text_style(17.0f, muted, TextAlign::Center);
         const std::vector<std::string> lines =
-            wrap_text(canvas, 17.0f, error, card.w * 0.82f, 2);
+            wrap_text(canvas, error_style, error, card.w * 0.82f, 2);
         float line_y = card.y + card.h * 0.34f + 34.0f;
         for (const std::string& line : lines) {
-            canvas.text(card.center_x(), line_y, 17.0f, muted, TextAlign::Center, line);
+            canvas.text(card.center_x(), line_y, error_style, line);
             line_y += 22.0f;
         }
     } else {
-        canvas.text(content.center_x(), content.center_y(), 22.0f, muted, TextAlign::Center,
-                    "Loading picture");
+        canvas.text(content.center_x(), content.center_y(),
+                    text_style(22.0f, muted, TextAlign::Center), "Loading picture");
     }
 
     if (layout.navigation) {
@@ -1278,9 +1304,9 @@ void MediaOverlay::draw(Canvas& canvas, Rect stage) const {
         const float right_x =
             layout.frame.x + layout.frame.w - layout.nav_margin - layout.nav_radius;
         canvas.fill_circle(left_x, center_y, layout.nav_radius,
-                           hex(0x232b23, layout.can_previous ? 1.0f : 0.3f));
+                           hex(0x2f372f, layout.can_previous ? 1.0f : 0.3f));
         canvas.fill_circle(right_x, center_y, layout.nav_radius,
-                           hex(0x232b23, layout.can_next ? 1.0f : 0.3f));
+                           hex(0x2f372f, layout.can_next ? 1.0f : 0.3f));
         draw_chevron(canvas, left_x, center_y, layout.nav_radius * 1.4f, true,
                      hex(0xf6fff5, layout.can_previous ? 1.0f : 0.35f));
         draw_chevron(canvas, right_x, center_y, layout.nav_radius * 1.4f, false,

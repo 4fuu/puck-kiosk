@@ -4,61 +4,97 @@
 #include "puck/puck_view.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace pk {
 namespace {
 
-constexpr int kQuietZoneModules = 4;
+constexpr float kRem = 16.0f;
+// The car page uses env(safe-area-inset-*). The current display seam has no
+// inset source, so kiosk builds use zero and keep the same formulas.
+constexpr float kSafeTop = 0.0f;
+constexpr float kSafeRight = 0.0f;
+constexpr float kSafeBottom = 0.0f;
+constexpr float kSafeLeft = 0.0f;
 
-void draw_qr(Canvas& canvas, Rect card, const QrCode& qr) {
-    const float radius = card.w * 0.09f;
-    canvas.fill_rounded_rect(Rect{card.x - 4.0f, card.y - 4.0f, card.w + 8.0f, card.h + 8.0f},
-                             radius + 4.0f, hex(0xffffff, 0.06f));
-    canvas.fill_rounded_rect(card, radius, hex(0xffffff));
+constexpr Color kBackground = hex(0x0b0d0b);
+constexpr Color kForeground = hex(0xf6fff5);
+constexpr Color kMuted = hex(0x9ca49c);
+constexpr Color kSecondary = hex(0x2f372f);
+constexpr Color kSuccess = hex(0x54b879);
+constexpr Color kStart = hex(0x30d158);
+constexpr Color kEnd = hex(0xff453a);
+constexpr Color kDestructive = hex(0xd67670);
+constexpr Color kWhite = hex(0xffffff);
+constexpr Color kQrInk = hex(0x000000);
 
-    const int total_modules = qr.size + kQuietZoneModules * 2;
-    const float cell = std::min(card.w, card.h) / static_cast<float>(total_modules + 2);
-    const float extent = cell * static_cast<float>(total_modules);
-    const float origin_x = card.center_x() - extent * 0.5f;
-    const float origin_y = card.center_y() - extent * 0.5f;
-    const Color dark = hex(0x0b0d0b);
+TextStyle type(float size, Color color, TextAlign align = TextAlign::Left,
+               FontWeight weight = FontWeight::Regular, float tracking = 0.0f) {
+    TextStyle style;
+    style.size = size;
+    style.color = color;
+    style.align = align;
+    style.weight = weight;
+    style.tracking = tracking;
+    return style;
+}
 
-    for (int y = 0; y < qr.size; ++y) {
-        for (int x = 0; x < qr.size; ++x) {
-            if (!qr.dark(x, y)) {
-                continue;
-            }
-            canvas.fill_rect(Rect{origin_x + (x + kQuietZoneModules) * cell,
-                                  origin_y + (y + kQuietZoneModules) * cell, cell + 0.4f, cell + 0.4f},
-                             dark);
+Color fade(Color color, float alpha) {
+    color.a *= alpha;
+    return color;
+}
+
+Color mix(Color base, Color over, float amount) {
+    const float t = std::clamp(amount, 0.0f, 1.0f);
+    return Color{base.r + (over.r - base.r) * t, base.g + (over.g - base.g) * t,
+                 base.b + (over.b - base.b) * t, 1.0f};
+}
+
+float clamp01(float value) {
+    return std::clamp(value, 0.0f, 1.0f);
+}
+
+bool compact_layout(Size size) {
+    const bool portrait = size.height > size.width;
+    return size.width <= 640 || (!portrait && size.height <= 500);
+}
+
+float hash01(std::uint32_t value) {
+    value = (value << 13) ^ value;
+    value = value * (value * value * 15731u + 789221u) + 1376312589u;
+    return static_cast<float>(value & 0x7fffffffu) / static_cast<float>(0x7fffffffu);
+}
+
+float bezier_channel(float t, float p1, float p2) {
+    const float u = 1.0f - t;
+    return 3.0f * u * u * t * p1 + 3.0f * u * t * t * p2 + t * t * t;
+}
+
+float cubic_bezier(float x1, float y1, float x2, float y2, float x) {
+    if (x <= 0.0f) {
+        return 0.0f;
+    }
+    if (x >= 1.0f) {
+        return 1.0f;
+    }
+    float low = 0.0f;
+    float high = 1.0f;
+    for (int i = 0; i < 24; ++i) {
+        const float mid = (low + high) * 0.5f;
+        if (bezier_channel(mid, x1, x2) < x) {
+            low = mid;
+        } else {
+            high = mid;
         }
     }
+    return bezier_channel((low + high) * 0.5f, y1, y2);
 }
 
-// Normal render mode has no pairing challenge, so show an honest placeholder
-// instead of a QR-shaped pattern that cannot be scanned.
-void draw_placeholder(Canvas& canvas, Rect card) {
-    const float radius = card.w * 0.09f;
-    canvas.fill_rounded_rect(Rect{card.x - 4.0f, card.y - 4.0f, card.w + 8.0f, card.h + 8.0f},
-                             radius + 4.0f, hex(0xffffff, 0.06f));
-    canvas.fill_rounded_rect(card, radius, hex(0xffffff));
-
-    const float box = card.w * 0.32f;
-    const Rect inner{card.center_x() - box * 0.5f, card.center_y() - box * 0.5f, box, box};
-    canvas.fill_rounded_rect(inner, box * 0.12f, hex(0x0b0d0b, 0.08f));
-    canvas.text(inner.center_x(), inner.center_y() + 1.0f, box * 0.22f, hex(0x9ca49c),
-                TextAlign::Center, "QR");
-    canvas.text(card.center_x(), card.y + card.h - 26.0f, 16.0f, hex(0x9ca49c), TextAlign::Center,
-                "run with --pair");
-}
-
-void draw_wrapped_text(Canvas& canvas, float center_x, float top, float size, Color color,
-                       const std::string& text, float max_width, int max_lines) {
-    if (text.empty() || max_lines <= 0) {
-        return;
-    }
+std::vector<std::string> wrap_text(Canvas& canvas, const TextStyle& style, const std::string& text,
+                                   float max_width) {
     std::vector<std::string> lines;
     std::string line;
     std::size_t index = 0;
@@ -67,12 +103,9 @@ void draw_wrapped_text(Canvas& canvas, float center_x, float top, float size, Co
         const std::string word =
             text.substr(index, space == std::string::npos ? std::string::npos : space - index);
         const std::string candidate = line.empty() ? word : line + " " + word;
-        if (!line.empty() && canvas.measure_text(size, candidate) > max_width) {
+        if (!line.empty() && max_width > 0.0f && canvas.measure_text(style, candidate) > max_width) {
             lines.push_back(line);
             line = word;
-            if (static_cast<int>(lines.size()) >= max_lines) {
-                break;
-            }
         } else {
             line = candidate;
         }
@@ -81,23 +114,19 @@ void draw_wrapped_text(Canvas& canvas, float center_x, float top, float size, Co
         }
         index = space + 1;
     }
-    if (static_cast<int>(lines.size()) < max_lines && !line.empty()) {
+    if (!line.empty()) {
         lines.push_back(line);
     }
-
-    float y = top + size;
-    for (const std::string& current : lines) {
-        canvas.text(center_x, y, size, color, TextAlign::Center, current);
-        y += size * 1.24f;
-    }
+    return lines;
 }
 
-std::string fit_text(Canvas& canvas, float size, const std::string& text, float max_width) {
-    if (max_width <= 0.0f || canvas.measure_text(size, text) <= max_width) {
+std::string fit_text(Canvas& canvas, const TextStyle& style, const std::string& text,
+                     float max_width) {
+    if (max_width <= 0.0f || canvas.measure_text(style, text) <= max_width) {
         return text;
     }
     std::string result = text;
-    while (!result.empty() && canvas.measure_text(size, result + "\u2026") > max_width) {
+    while (!result.empty() && canvas.measure_text(style, result + "\u2026") > max_width) {
         result.pop_back();
         while (!result.empty() && (static_cast<unsigned char>(result.back()) & 0xc0) == 0x80) {
             result.pop_back();
@@ -106,35 +135,568 @@ std::string fit_text(Canvas& canvas, float size, const std::string& text, float 
     return result.empty() ? std::string{} : result + "\u2026";
 }
 
-void draw_status_dot(Canvas& canvas, float x, float y, CallPhase phase) {
-    Color color = hex(0x6b746b);
-    if (phase == CallPhase::Active || phase == CallPhase::Speaking ||
-        phase == CallPhase::Thinking || phase == CallPhase::Muted) {
-        color = hex(0x5fd08a);
-    } else if (phase == CallPhase::Starting || phase == CallPhase::Connecting) {
-        color = hex(0xe0b85f);
-    } else if (phase == CallPhase::Failed) {
-        color = hex(0xe0524b);
+TextStyle fit_font_size(Canvas& canvas, TextStyle style, const std::string& text, float max_width,
+                        float minimum_size) {
+    while (style.size > minimum_size && canvas.measure_text(style, text) > max_width) {
+        style.size -= 1.0f;
     }
-    canvas.fill_circle(x, y, 6.0f, color);
+    return style;
 }
 
-void draw_pill(Canvas& canvas, Rect rect, Color fill, Color text_color, const std::string& label,
-               float font_size) {
-    canvas.fill_rounded_rect(rect, rect.h * 0.5f, fill);
-    canvas.text(rect.center_x(), rect.center_y() + font_size * 0.36f, font_size, text_color,
-                TextAlign::Center, label);
+void text_in_line(Canvas& canvas, float x, float top, float line_height, const TextStyle& style,
+                  const std::string& value) {
+    canvas.text(x, top + line_height * 0.5f, style, value);
 }
 
-void draw_phone_icon(Canvas& canvas, float center_x, float center_y, float radius, Color color) {
-    canvas.fill_circle(center_x, center_y, radius, hex(0x232b23));
-    const float top = center_y - radius * 0.36f;
-    const float width = radius * 1.16f;
-    const float bar = radius * 0.22f;
-    const float left = center_x - width * 0.5f;
-    canvas.fill_rounded_rect(Rect{left, top, width, bar}, bar * 0.5f, color);
-    canvas.fill_rounded_rect(Rect{left, top, bar, radius * 0.72f}, bar * 0.5f, color);
-    canvas.fill_rounded_rect(Rect{left + width - bar, top, bar, radius * 0.72f}, bar * 0.5f, color);
+float draw_wrapped_center(Canvas& canvas, float center_x, float top, const TextStyle& style,
+                          float line_height, const std::string& text, float max_width) {
+    const std::vector<std::string> lines = wrap_text(canvas, style, text, max_width);
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        text_in_line(canvas, center_x, top + static_cast<float>(i) * line_height, line_height,
+                     style, lines[i]);
+    }
+    return static_cast<float>(lines.size()) * line_height;
+}
+
+void draw_round_button(Canvas& canvas, float center_x, float center_y, float diameter, Color fill,
+                       float opacity) {
+    canvas.fill_circle(center_x, center_y, diameter * 0.5f, fade(fill, opacity));
+}
+
+void draw_call_icon(Canvas& canvas, float center_x, float center_y, float size, Color color) {
+    canvas.stroke_line(center_x - 0.21f * size, center_y - 0.21f * size,
+                       center_x + 0.21f * size, center_y + 0.21f * size, 0.16f * size, color);
+    canvas.fill_rounded_rect(Rect{center_x - 0.44f * size, center_y - 0.46f * size,
+                                  0.26f * size, 0.38f * size},
+                             0.11f * size, color);
+    canvas.fill_rounded_rect(Rect{center_x + 0.18f * size, center_y + 0.08f * size,
+                                  0.38f * size, 0.26f * size},
+                             0.11f * size, color);
+}
+
+void draw_end_icon(Canvas& canvas, float center_x, float center_y, float size, Color color) {
+    const float dot = 0.078f * size;
+    const float start = 3.490659f;  // 200 degrees
+    const float end = 5.934119f;    // 340 degrees
+    for (int i = 0; i <= 24; ++i) {
+        const float angle = start + (end - start) * (static_cast<float>(i) / 24.0f);
+        canvas.fill_circle(center_x + std::cos(angle) * 0.38f * size,
+                           center_y + 0.04f * size + std::sin(angle) * 0.22f * size, dot,
+                           color);
+    }
+    const float end_w = 0.26f * size;
+    const float end_h = 0.32f * size;
+    canvas.fill_rounded_rect(Rect{center_x - 0.38f * size - end_w * 0.5f,
+                                  center_y + 0.16f * size - end_h * 0.5f, end_w, end_h},
+                             0.08f * size, color);
+    canvas.fill_rounded_rect(Rect{center_x + 0.38f * size - end_w * 0.5f,
+                                  center_y + 0.16f * size - end_h * 0.5f, end_w, end_h},
+                             0.08f * size, color);
+}
+
+void draw_mute_icon(Canvas& canvas, float center_x, float center_y, float size, Color color,
+                    Color button_fill) {
+    const float body_w = 0.26f * size;
+    const float body_h = 0.54f * size;
+    const Rect body{center_x - body_w * 0.5f, center_y - 0.08f * size - body_h * 0.5f, body_w,
+                    body_h};
+    canvas.fill_rounded_rect(body, body_w * 0.5f, color);
+    const float inner_w = 0.12f * size;
+    const float inner_h = 0.40f * size;
+    canvas.fill_rounded_rect(Rect{center_x - inner_w * 0.5f,
+                                  center_y - 0.08f * size - inner_h * 0.5f, inner_w, inner_h},
+                             inner_w * 0.5f, button_fill);
+
+    const float stroke = 0.065f * size;
+    const float cradle_x = 0.25f * size;
+    const float cradle_top = center_y - 0.12f * size;
+    const float cradle_bottom = center_y + 0.13f * size;
+    canvas.stroke_line(center_x - cradle_x, cradle_top, center_x - cradle_x, cradle_bottom, stroke,
+                       color);
+    canvas.stroke_line(center_x + cradle_x, cradle_top, center_x + cradle_x, cradle_bottom, stroke,
+                       color);
+    canvas.stroke_line(center_x - cradle_x, cradle_bottom, center_x + cradle_x, cradle_bottom,
+                       stroke, color);
+    canvas.stroke_line(center_x, cradle_bottom, center_x, center_y + 0.30f * size, stroke, color);
+
+    canvas.stroke_line(center_x - 0.40f * size, center_y - 0.36f * size,
+                       center_x + 0.40f * size, center_y + 0.36f * size, 0.080f * size, color);
+}
+
+void draw_lock_icon(Canvas& canvas, float center_x, float center_y, float size, Color color,
+                    Color background) {
+    canvas.stroke_circle(center_x, center_y - 0.08f * size, 0.18f * size, 0.055f * size, color);
+    canvas.fill_rounded_rect(Rect{center_x - 0.24f * size, center_y - 0.02f * size,
+                                  0.48f * size, 0.34f * size},
+                             0.08f * size, color);
+    canvas.fill_circle(center_x, center_y + 0.12f * size, 0.045f * size, background);
+}
+
+void draw_qr_card(Canvas& canvas, Rect card, float radius, const QrCode& qr) {
+    canvas.fill_rounded_rect(card, radius, kWhite);
+    if (qr.empty()) {
+        const float box = card.w * 0.32f;
+        const Rect inner{card.center_x() - box * 0.5f, card.center_y() - box * 0.5f, box, box};
+        canvas.fill_rounded_rect(inner, box * 0.12f, hex(0x0b0d0b, 0.08f));
+        canvas.text(inner.center_x(), inner.center_y(), type(box * 0.22f, kMuted, TextAlign::Center),
+                    "QR");
+        return;
+    }
+
+    const int total_modules = qr.size + 8;
+    const float inner = card.w - 12.0f;
+    const float cell = inner / static_cast<float>(total_modules);
+    const float origin_x = card.center_x() - inner * 0.5f;
+    const float origin_y = card.center_y() - inner * 0.5f;
+    for (int y = 0; y < qr.size; ++y) {
+        for (int x = 0; x < qr.size; ++x) {
+            if (!qr.dark(x, y)) {
+                continue;
+            }
+            canvas.fill_rect(Rect{origin_x + static_cast<float>(x + 4) * cell,
+                                  origin_y + static_cast<float>(y + 4) * cell, cell + 0.35f,
+                                  cell + 0.35f},
+                             kQrInk);
+        }
+    }
+
+    // The web puts the Amp mark in the middle. The native pairing encoder uses
+    // EC-M, so keep the mark well below the web's 35% to preserve the code.
+    const float logo_size = card.w * 0.14f;
+    const Rect logo{card.center_x() - logo_size * 0.5f, card.center_y() - logo_size * 0.5f,
+                    logo_size, logo_size};
+    canvas.fill_rounded_rect(logo, logo_size * 0.22f, kQrInk);
+    const TextStyle logo_style = type(logo_size * 0.32f, kWhite, TextAlign::Center);
+    canvas.text(logo.center_x(), logo.center_y(), logo_style,
+                fit_text(canvas, logo_style, "amp", logo_size * 0.88f));
+}
+
+void draw_call_backdrop(Canvas& canvas, Rect stage, Rect puck, float time_seconds, bool speaking) {
+    if (!speaking) {
+        return;
+    }
+    for (int i = 0; i < 56; ++i) {
+        const float x = stage.x + stage.w * (0.06f + 0.88f * hash01(static_cast<std::uint32_t>(i * 4 + 1)));
+        const float y = stage.y + stage.h * (0.06f + 0.88f * hash01(static_cast<std::uint32_t>(i * 4 + 2)));
+        const float phase = hash01(static_cast<std::uint32_t>(i * 4 + 3));
+        const float twinkle = 0.5f + 0.5f * std::sin(time_seconds * 1.1f + phase * 6.2831853f);
+        const float alpha = 0.025f + 0.075f * twinkle;
+        const float radius = 0.6f + 1.0f * hash01(static_cast<std::uint32_t>(i * 4 + 4));
+        canvas.fill_circle(x, y, radius, hex(0xdfe8d8, alpha));
+    }
+
+    const float foot_y = puck.y + puck.h * 0.93f;
+    for (int i = 10; i >= 1; --i) {
+        const float t = static_cast<float>(i) / 10.0f;
+        canvas.fill_ellipse(puck.center_x(), foot_y, puck.w * (0.10f + 0.30f * t),
+                            puck.h * (0.010f + 0.045f * t), hex(0xb8c7a2, 0.010f));
+    }
+    const float top_y = puck.y + puck.h * 0.06f;
+    for (int i = 12; i >= 1; --i) {
+        const float t = static_cast<float>(i) / 12.0f;
+        canvas.fill_triangle(puck.center_x() - puck.w * (0.03f + 0.10f * t), top_y,
+                             puck.center_x() + puck.w * (0.03f + 0.10f * t), top_y,
+                             puck.center_x() + puck.w * (0.10f + 0.34f * t), foot_y,
+                             hex(0xb8c7a2, 0.004f));
+    }
+}
+
+struct PairingLayout {
+    bool portrait = false;
+    bool compact = false;
+    Rect stage;
+    Rect side;
+    Rect title;
+    Rect slot;
+    Rect card;
+    Rect signin;
+    Rect debug;
+    TextStyle title_style;
+    TextStyle signin_style;
+    TextStyle code_style;
+    float title_line = 60.0f;
+    float side_gap = 24.0f;
+    float card_radius = 20.0f;
+    bool show_signin = true;
+};
+
+PairingLayout pairing_layout(Canvas& canvas, Size size, const std::string& title,
+                             const std::string& code) {
+    PairingLayout layout;
+    const float width = static_cast<float>(size.width);
+    const float height = static_cast<float>(size.height);
+    layout.portrait = height > width;
+    const bool short_landscape = !layout.portrait && height <= 500.0f;
+    layout.compact = width <= 640.0f || short_landscape;
+
+    float qr = 0.0f;
+    if (layout.portrait) {
+        qr = width <= 640.0f ? std::min(height * 0.22f, width - 128.0f)
+                             : std::min({height * 0.22f, width * 0.60f, 256.0f});
+    } else if (short_landscape) {
+        qr = std::min(height * 0.50f, width * 0.30f);
+    } else {
+        qr = std::min(height * 0.36f, 288.0f);
+    }
+    qr = std::max(80.0f, qr);
+    const float card = qr + 12.0f;
+    layout.card_radius = layout.compact ? 16.0f : 20.0f;
+
+    const float title_size =
+        layout.compact ? (layout.portrait ? 36.0f : 28.0f) : 48.0f;
+    layout.title_line = layout.compact ? (layout.portrait ? 40.0f : 32.0f) : 60.0f;
+    layout.title_style =
+        type(title_size, kForeground, TextAlign::Center, FontWeight::Semibold, -0.025f);
+    const float signin_size = layout.compact ? 18.0f : 24.0f;
+    const float signin_pad = layout.compact ? 20.0f : 28.0f;
+    const float signin_height = layout.compact ? 44.0f : 56.0f;
+    layout.signin_style = type(signin_size, kMuted, TextAlign::Center);
+    const float code_size = layout.compact ? 56.0f : 72.0f;
+    layout.code_style =
+        type(code_size, kForeground, TextAlign::Center, FontWeight::Medium, 0.2f);
+    layout.side_gap = layout.portrait ? (width <= 640.0f ? 16.0f : 24.0f)
+                                      : (short_landscape ? 12.0f : 24.0f);
+
+    float pad_top = 0.0f;
+    float pad_right = 0.0f;
+    float pad_bottom = 0.0f;
+    float pad_left = 0.0f;
+    if (layout.portrait) {
+        pad_top = 16.0f;
+        pad_bottom = width <= 640.0f ? 64.0f : 80.0f;
+        pad_left = pad_right = 24.0f;
+    } else {
+        pad_left = 32.0f;
+        pad_right = short_landscape ? 40.0f : 80.0f;
+    }
+    pad_top += kSafeTop;
+    pad_right += kSafeRight;
+    pad_bottom += kSafeBottom;
+    pad_left += kSafeLeft;
+    const float gap = layout.portrait ? 24.0f : (short_landscape ? 24.0f : 48.0f);
+    layout.show_signin = code.empty() && title != "Connecting";
+
+    float side_width = card;
+    if (layout.portrait) {
+        const float available = width - pad_left - pad_right;
+        const float title_width = canvas.measure_text(layout.title_style, title);
+        const float signin_width =
+            canvas.measure_text(layout.signin_style, "Or Sign In Manually") + signin_pad * 2.0f;
+        side_width = std::min(available, std::max({card, title_width, signin_width}));
+        side_width = std::max(side_width, std::min(card, available));
+    }
+
+    const std::vector<std::string> title_lines =
+        wrap_text(canvas, layout.title_style, title, side_width);
+    const float title_height =
+        static_cast<float>(std::max<std::size_t>(1, title_lines.size())) * layout.title_line;
+    const float side_height = title_height + layout.side_gap + card +
+                              (layout.show_signin ? layout.side_gap + signin_height : 0.0f);
+
+    if (layout.portrait) {
+        const float stage_height =
+            std::max(0.0f, height - pad_top - pad_bottom - gap - side_height);
+        layout.stage = Rect{pad_left, pad_top, width - pad_left - pad_right, stage_height};
+        layout.side = Rect{(width - side_width) * 0.5f, pad_top + stage_height + gap, side_width,
+                           side_height};
+    } else {
+        const float stage_width =
+            std::max(0.0f, width - pad_left - pad_right - gap - side_width);
+        layout.stage = Rect{pad_left, pad_top, stage_width, height - pad_top - pad_bottom};
+        layout.side = Rect{width - pad_right - side_width,
+                           pad_top + (height - pad_top - pad_bottom - side_height) * 0.5f,
+                           side_width, side_height};
+    }
+
+    layout.title = Rect{layout.side.x, layout.side.y, layout.side.w, title_height};
+    layout.slot = Rect{layout.side.x, layout.title.y + layout.title.h + layout.side_gap,
+                       layout.side.w, card};
+    layout.card = Rect{layout.slot.x, layout.slot.y, card, card};
+    if (layout.show_signin) {
+        const float signin_width =
+            canvas.measure_text(layout.signin_style, "Or Sign In Manually") + signin_pad * 2.0f;
+        layout.signin = Rect{layout.side.center_x() - signin_width * 0.5f,
+                             layout.slot.y + layout.slot.h + layout.side_gap, signin_width,
+                             signin_height};
+    }
+
+    const float debug_height = layout.compact ? 44.0f : 64.0f;
+    const float debug_font = layout.compact ? 16.0f : 20.0f;
+    const float debug_pad = layout.compact ? 16.0f : 24.0f;
+    const float debug_width =
+        canvas.measure_text(type(debug_font, kForeground), "Debug") + debug_pad * 2.0f;
+    const float margin = layout.compact ? 12.0f : 40.0f;
+    layout.debug = Rect{margin + kSafeLeft, height - margin - debug_height - kSafeBottom,
+                        debug_width, debug_height};
+    return layout;
+}
+
+struct CallLayout {
+    bool wide = false;
+    bool compact = false;
+    bool portrait = false;
+    Rect header;
+    Rect main;
+    Rect main_content;
+    Rect puck_space;
+    Rect puck;
+    Rect caption;
+    Rect controls;
+    Rect overlay;
+    float header_height = 96.0f;
+    float header_pad = 40.0f;
+    float button_size = 136.0f;
+    float split_x = 100.0f;
+    float split_y = 0.0f;
+    float icon_size = 52.0f;
+    float caption_size = 40.0f;
+    float caption_height = 48.0f;
+    float controls_pad_x = 0.0f;
+    float controls_pad_bottom = 24.0f;
+    float control_center_x = 0.0f;
+    float control_center_y = 0.0f;
+};
+
+CallLayout call_layout(Size size) {
+    CallLayout layout;
+    const float width = static_cast<float>(size.width);
+    const float height = static_cast<float>(size.height);
+    layout.portrait = height > width;
+    const bool short_landscape = !layout.portrait && height <= 500.0f;
+    layout.compact = width <= 640.0f || short_landscape;
+    layout.wide = !layout.portrait && width >= 900.0f && height >= 600.0f;
+    layout.header_height = layout.compact ? 56.0f : 96.0f;
+    layout.header_pad = layout.compact ? 12.0f : 40.0f;
+
+    if (layout.wide) {
+        const float rail = std::clamp(width * 0.26f, 288.0f, 384.0f);
+        layout.header = Rect{0.0f, 0.0f, rail, layout.header_height};
+        layout.main = Rect{rail, 0.0f, width - rail, height};
+        layout.controls = Rect{0.0f, layout.header_height, rail, height - layout.header_height};
+        layout.controls_pad_x = 32.0f;
+        layout.controls_pad_bottom = 64.0f;
+        layout.button_size = 176.0f;
+        layout.split_x = 0.0f;
+        layout.split_y = -112.0f;
+        layout.icon_size = 64.0f;
+        layout.caption_size = 40.0f;
+        layout.caption_height = 48.0f;
+        layout.main_content =
+            Rect{layout.main.x + 32.0f, 64.0f + kSafeTop, layout.main.w - 64.0f,
+                 height - 128.0f - kSafeTop - kSafeBottom};
+        layout.overlay = Rect{rail, kSafeTop, width - rail - kSafeRight, height - 88.0f - kSafeBottom};
+    } else if (short_landscape) {
+        const float controls_width = 272.0f;
+        layout.header = Rect{0.0f, 0.0f, width, layout.header_height};
+        layout.main = Rect{0.0f, layout.header_height, width - controls_width,
+                           height - layout.header_height};
+        layout.controls = Rect{width - controls_width, layout.header_height, controls_width,
+                               height - layout.header_height};
+        layout.controls_pad_x = 16.0f;
+        layout.controls_pad_bottom = 16.0f;
+        layout.button_size = 88.0f;
+        layout.split_x = 0.0f;
+        layout.split_y = -56.0f;
+        layout.icon_size = 36.0f;
+        layout.caption_size = 20.0f;
+        layout.caption_height = 32.0f;
+        layout.main_content = Rect{layout.main.x + kSafeLeft, layout.main.y + 40.0f + kSafeTop,
+                                   layout.main.w - kSafeLeft - kSafeRight,
+                                   layout.main.h - 80.0f - kSafeTop - kSafeBottom};
+        layout.overlay = Rect{0.0f, layout.header_height + kSafeTop,
+                              width - controls_width - kSafeRight,
+                              height - layout.header_height - kSafeTop - kSafeBottom};
+    } else {
+        const float controls_height = layout.compact ? 160.0f : 208.0f;
+        layout.header = Rect{0.0f, 0.0f, width, layout.header_height};
+        layout.controls = Rect{0.0f, height - controls_height - kSafeBottom, width,
+                               controls_height};
+        layout.main = Rect{0.0f, layout.header_height, width,
+                           height - layout.header_height - controls_height - kSafeBottom};
+        layout.controls_pad_x = 0.0f;
+        layout.controls_pad_bottom = layout.compact ? 16.0f : 24.0f;
+        layout.button_size = layout.compact ? 88.0f : 136.0f;
+        layout.split_x = layout.compact ? 68.0f : 100.0f;
+        layout.split_y = 0.0f;
+        layout.icon_size = layout.compact ? 36.0f : 52.0f;
+        layout.caption_size = layout.compact ? 24.0f : 40.0f;
+        layout.caption_height = layout.compact ? 36.0f : 48.0f;
+        const float pad_y = layout.compact ? 48.0f : 64.0f;
+        layout.main_content = Rect{layout.main.x, layout.main.y + pad_y + kSafeTop,
+                                   layout.main.w, layout.main.h - pad_y * 2.0f - kSafeTop};
+        layout.overlay = Rect{0.0f, kSafeTop, width, height - controls_height - kSafeBottom};
+    }
+
+    layout.puck_space = layout.main_content;
+    const float puck_size =
+        std::max(0.0f, std::min(layout.puck_space.w - 32.0f, layout.puck_space.h));
+    layout.puck = Rect{layout.puck_space.center_x() - puck_size * 0.5f,
+                       layout.puck_space.center_y() - puck_size * 0.5f, puck_size, puck_size};
+
+    const float caption_pad = layout.compact ? 16.0f : 32.0f;
+    layout.caption = Rect{layout.main.x + caption_pad,
+                          layout.main.y + layout.main.h - 8.0f - layout.caption_height,
+                          layout.main.w - caption_pad * 2.0f, layout.caption_height};
+
+    if (layout.wide || short_landscape) {
+        layout.control_center_x = layout.controls.center_x();
+        layout.control_center_y =
+            layout.controls.y + (layout.controls.h - layout.controls_pad_bottom) * 0.5f;
+    } else {
+        layout.control_center_x = width * 0.5f;
+        layout.control_center_y =
+            layout.controls.y + (layout.controls.h - layout.controls_pad_bottom) * 0.5f;
+    }
+    return layout;
+}
+
+std::string call_caption(const CallView& call) {
+    switch (call.phase) {
+        case CallPhase::Starting:
+        case CallPhase::Connecting:
+            return "Connecting";
+        case CallPhase::Thinking:
+            return "Thinking";
+        case CallPhase::Ended:
+            return "Call Ended";
+        case CallPhase::Failed:
+            return call.detail.empty() ? "Call failed" : call.detail;
+        case CallPhase::Idle:
+        case CallPhase::Active:
+        case CallPhase::Speaking:
+        case CallPhase::Muted:
+            return {};
+    }
+    return {};
+}
+
+void draw_call_header(Canvas& canvas, const CallLayout& layout, Size size) {
+    const float logo_size = layout.compact ? 20.0f : 28.0f;
+    const TextAlign align = layout.compact ? TextAlign::Center : TextAlign::Left;
+    const float x = layout.compact ? static_cast<float>(size.width) * 0.5f
+                                   : layout.header.x + layout.header_pad;
+    canvas.text(x, layout.header.center_y(), type(logo_size, kMuted, align), "amp");
+}
+
+void draw_call_caption(Canvas& canvas, const CallLayout& layout, const CallView& call) {
+    const std::string text = call_caption(call);
+    if (text.empty()) {
+        return;
+    }
+    const Color color = call.phase == CallPhase::Failed ? kDestructive : kMuted;
+    const TextStyle style = type(layout.caption_size, color, TextAlign::Center, FontWeight::Medium);
+    canvas.text(layout.caption.center_x(), layout.caption.center_y(), style,
+                fit_text(canvas, style, text, layout.caption.w));
+}
+
+Rect confirm_rect(const CallLayout& layout) {
+    if (layout.wide) {
+        const float width = layout.controls.w - layout.controls_pad_x * 2.0f;
+        const float height = 128.0f;
+        return Rect{layout.controls.x + layout.controls_pad_x,
+                    layout.controls.y +
+                        (layout.controls.h - layout.controls_pad_bottom - height) * 0.5f,
+                    width, height};
+    }
+    if (layout.compact && !layout.portrait) {
+        const float width = std::min(layout.controls.w - layout.controls_pad_x * 2.0f - 32.0f,
+                                     26.0f * kRem);
+        return Rect{layout.controls.center_x() - width * 0.5f, layout.control_center_y - 40.0f,
+                    width, 80.0f};
+    }
+    if (layout.compact) {
+        const float width = std::min(static_cast<float>(layout.main.w) - 32.0f, 26.0f * kRem);
+        return Rect{layout.control_center_x - width * 0.5f, layout.control_center_y - 40.0f,
+                    width, 80.0f};
+    }
+    const float width = std::min(layout.controls.w - 26.0f * kRem, 32.0f * kRem);
+    return Rect{layout.control_center_x - width * 0.5f, layout.control_center_y - 64.0f, width,
+                128.0f};
+}
+
+void draw_confirm_button(Canvas& canvas, const CallLayout& layout, const PasskeyView& passkey,
+                         UiHitMap& hits) {
+    const Rect rect = confirm_rect(layout);
+    const bool confirming = passkey.confirming;
+    canvas.fill_rounded_rect(rect, rect.h * 0.5f, confirming ? kSecondary : kSuccess);
+
+    const float font = layout.compact ? 26.0f : (layout.wide ? 32.0f : 36.0f);
+    TextStyle label_style = type(font, confirming ? kMuted : kWhite, TextAlign::Center,
+                                 FontWeight::Semibold);
+    const std::string label = confirming ? "Confirming\u2026" : "Confirm Passkey";
+    const float icon_size = layout.compact ? 32.0f : 44.0f;
+    const float gap = layout.compact ? 12.0f : 20.0f;
+    const float inset = 16.0f;
+    const float available = rect.w - inset * 2.0f;
+    const float label_width = canvas.measure_text(label_style, label);
+    const bool with_icon = !confirming && label_width + icon_size + gap <= available;
+    if (with_icon) {
+        const float group = icon_size + gap + label_width;
+        const float start = rect.center_x() - group * 0.5f;
+        draw_lock_icon(canvas, start + icon_size * 0.5f, rect.center_y(), icon_size, kWhite,
+                       kSuccess);
+        canvas.text(start + icon_size + gap, rect.center_y(), label_style, label);
+    } else {
+        label_style = fit_font_size(canvas, label_style, label, available, 20.0f);
+        canvas.text(rect.center_x(), rect.center_y(), label_style,
+                    fit_text(canvas, label_style, label, available));
+    }
+    if (!confirming) {
+        hits.add(rect, UiAction::PasskeyConfirm);
+    }
+}
+
+void draw_call_controls(Canvas& canvas, const CallLayout& layout, const CallView& call,
+                        const PasskeyView& passkey, float split, UiHitMap& hits) {
+    // The web keeps the call object (and its End/Mute controls) after a failed
+    // call; only ending it returns to the green call button.
+    const bool in_call = call.in_call() || call.phase == CallPhase::Failed;
+    if ((passkey.confirm_button || passkey.confirming) && !in_call) {
+        draw_confirm_button(canvas, layout, passkey, hits);
+        return;
+    }
+
+    if (!in_call) {
+        const float center_x = layout.control_center_x + layout.split_x * split;
+        const float center_y = layout.control_center_y + layout.split_y * split;
+        const bool can_call = passkey.mode != PasskeyMode::Phone;
+        const float opacity = can_call ? 1.0f : 0.4f;
+        draw_round_button(canvas, center_x, center_y, layout.button_size, kStart, opacity);
+        draw_call_icon(canvas, center_x, center_y, layout.icon_size, fade(kWhite, opacity));
+        if (can_call) {
+            const float radius = layout.button_size * 0.5f;
+            hits.add(Rect{center_x - radius, center_y - radius, layout.button_size,
+                          layout.button_size},
+                     UiAction::Call);
+        }
+        return;
+    }
+
+    const float end_x = layout.control_center_x + layout.split_x * split;
+    const float end_y = layout.control_center_y + layout.split_y * split;
+    const float mute_x = layout.control_center_x - layout.split_x * split;
+    const float mute_y = layout.control_center_y - layout.split_y * split;
+    const float radius = layout.button_size * 0.5f;
+    const bool disabled = call.phase == CallPhase::Starting ||
+                          call.phase == CallPhase::Connecting || call.phase == CallPhase::Failed;
+
+    draw_round_button(canvas, end_x, end_y, layout.button_size, kEnd, 1.0f);
+    draw_end_icon(canvas, end_x, end_y, layout.icon_size, kWhite);
+    hits.add(Rect{end_x - radius, end_y - radius, layout.button_size, layout.button_size},
+             UiAction::End);
+
+    const float presence = clamp01(split * 2.0f);
+    const float opacity = presence * (disabled ? 0.4f : 1.0f);
+    const float scale = 0.65f + 0.35f * presence;
+    const Color fill = call.muted ? kForeground : kSecondary;
+    const Color icon = call.muted ? kBackground : kForeground;
+    const Color cutout = mix(kBackground, fill, opacity);
+    draw_round_button(canvas, mute_x, mute_y, layout.button_size * scale, fill, opacity);
+    draw_mute_icon(canvas, mute_x, mute_y, layout.icon_size * scale, fade(icon, opacity), cutout);
+    if (!disabled) {
+        hits.add(Rect{mute_x - radius, mute_y - radius, layout.button_size, layout.button_size},
+                 UiAction::Mute);
+    }
 }
 
 }  // namespace
@@ -156,6 +718,29 @@ void CarUi::set_call(const CallView& view) {
     call_ = view;
 }
 
+float CarUi::control_split(float time_seconds, bool in_call) {
+    const float target = in_call ? 1.0f : 0.0f;
+    if (control_split_ < 0.0f || time_seconds + 0.001f < last_draw_time_) {
+        control_split_ = target;
+        split_from_ = target;
+        split_start_ = time_seconds;
+        split_target_ = target;
+    } else if (target != split_target_) {
+        split_from_ = control_split_;
+        split_start_ = time_seconds;
+        split_target_ = target;
+    }
+    const float duration = 0.4f;
+    const float progress =
+        split_target_ == split_from_
+            ? 1.0f
+            : clamp01((time_seconds - split_start_) / duration);
+    const float eased = cubic_bezier(0.22f, 1.0f, 0.36f, 1.0f, progress);
+    control_split_ = split_from_ + (split_target_ - split_from_) * eased;
+    last_draw_time_ = time_seconds;
+    return control_split_;
+}
+
 void CarUi::draw(Canvas& canvas, Size size, float time_seconds) {
     hits_.clear();
     if (debug_.open) {
@@ -170,124 +755,62 @@ void CarUi::draw(Canvas& canvas, Size size, float time_seconds) {
 }
 
 void CarUi::draw_pairing(Canvas& canvas, Size size, float time_seconds) {
-    const bool portrait = size.height > size.width;
-    Rect puck_area;
-    Rect panel;
-    if (portrait) {
-        puck_area = Rect{0.0f, 0.0f, static_cast<float>(size.width), static_cast<float>(size.height) * 0.58f};
-        panel = Rect{0.0f, puck_area.h, static_cast<float>(size.width),
-                     static_cast<float>(size.height) - puck_area.h};
-    } else {
-        puck_area = Rect{0.0f, 0.0f, static_cast<float>(size.width) * 0.60f, static_cast<float>(size.height)};
-        panel = Rect{puck_area.w, 0.0f, static_cast<float>(size.width) - puck_area.w,
-                     static_cast<float>(size.height)};
+    const PairingLayout layout = pairing_layout(canvas, size, title_, code_);
+
+    const float puck_size = std::min(layout.stage.w, layout.stage.h);
+    const float puck_y = layout.portrait ? layout.stage.y + layout.stage.h - puck_size
+                                         : layout.stage.y + (layout.stage.h - puck_size) * 0.5f;
+    const Rect puck{layout.stage.center_x() - puck_size * 0.5f, puck_y, puck_size, puck_size};
+    puck_.draw(canvas, puck, visual_, time_seconds);
+
+    if (!title_.empty()) {
+        draw_wrapped_center(canvas, layout.title.center_x(), layout.title.y, layout.title_style,
+                            layout.title_line, title_, layout.title.w);
     }
 
-    // A faint studio glow behind Puck; the final 3D renderer draws a real
-    // spotlight, but the 2D fallback should still feel like the same stage.
-    canvas.fill_ellipse(puck_area.center_x(), puck_area.center_y() + puck_area.h * 0.14f,
-                        puck_area.w * 0.34f, puck_area.h * 0.40f, hex(0x121712, 0.75f));
-    canvas.fill_ellipse(puck_area.center_x(), puck_area.center_y() + puck_area.h * 0.08f,
-                        puck_area.w * 0.24f, puck_area.h * 0.28f, hex(0x171d15, 0.55f));
-
-    puck_.draw(canvas, puck_area, visual_, time_seconds);
-
-    const Color foreground = hex(0xf6fff5);
-    const Color muted = hex(0x9ca49c);
-
-    float title_size = portrait ? 40.0f : 46.0f;
-    while (title_size > 22.0f && canvas.measure_text(title_size, title_) > panel.w * 0.9f) {
-        title_size -= 2.0f;
-    }
-    const float title_y = panel.y + (portrait ? 64.0f : panel.h * 0.26f);
-    canvas.text(panel.center_x(), title_y, title_size, foreground, TextAlign::Center, title_);
-
-    float qr_size = std::min(panel.w * 0.52f, panel.h * 0.46f);
-    qr_size = std::min(qr_size, 300.0f);
-    const Rect card{panel.center_x() - qr_size * 0.5f, title_y + title_size * 0.80f, qr_size, qr_size};
-
-    if (qr_.empty()) {
-        draw_placeholder(canvas, card);
+    if (code_.empty()) {
+        draw_qr_card(canvas, layout.card, layout.card_radius, qr_);
     } else {
-        draw_qr(canvas, card, qr_);
+        TextStyle code_style =
+            fit_font_size(canvas, layout.code_style, code_, layout.slot.w - 16.0f, 28.0f);
+        canvas.text(layout.slot.center_x(), layout.slot.center_y(), code_style, code_);
     }
 
-    const float below_card = card.y + card.h;
-    if (!code_.empty()) {
-        canvas.text(panel.center_x(), below_card + 26.0f, 20.0f, muted, TextAlign::Center, status_);
-        canvas.text(panel.center_x(), below_card + 68.0f, 44.0f, foreground, TextAlign::Center, code_);
-    } else if (!status_.empty()) {
-        canvas.text(panel.center_x(), below_card + 30.0f, 20.0f, muted, TextAlign::Center, status_);
-    } else {
-        canvas.text(panel.center_x(), below_card + 30.0f, 20.0f, muted, TextAlign::Center,
+    if (layout.show_signin) {
+        canvas.text(layout.signin.center_x(), layout.signin.center_y(), layout.signin_style,
                     "Or Sign In Manually");
     }
 
-    canvas.text(28.0f, 30.0f, 18.0f, muted, TextAlign::Left, "puck-kiosk");
-    draw_debug_entry(canvas, size);
+    add_debug_target(canvas, size, true);
 }
 
 void CarUi::draw_call(Canvas& canvas, Size size, float time_seconds) {
-    const bool portrait = size.height > size.width;
-    const float width = static_cast<float>(size.width);
-    const float height = static_cast<float>(size.height);
+    const CallLayout layout = call_layout(size);
+    const bool in_call = call_.in_call() || call_.phase == CallPhase::Failed;
+    const float split = control_split(time_seconds, in_call);
 
-    const float stage_height = height * (portrait ? 0.68f : 0.72f);
-    Rect puck_area{0.0f, 0.0f, width, stage_height};
-    const float puck_size = std::min(puck_area.w * (portrait ? 0.82f : 0.40f),
-                                     puck_area.h * (portrait ? 0.70f : 0.70f));
-    const Rect puck_rect{puck_area.center_x() - puck_size * 0.5f,
-                         puck_area.center_y() - puck_size * 0.62f, puck_size, puck_size};
-
-    const Color foreground = hex(0xf6fff5);
-    const Color muted_text = hex(0x9ca49c);
-    const bool ended = call_.phase == CallPhase::Ended;
-    const bool failed = call_.phase == CallPhase::Failed;
-    const bool connecting =
-        call_.phase == CallPhase::Starting || call_.phase == CallPhase::Connecting;
-    const bool in_call = call_.in_call();
+    draw_call_header(canvas, layout, size);
 
     if (passkey_.mode != PasskeyMode::Hidden && !in_call) {
-        draw_passkey(canvas, puck_area);
+        draw_passkey(canvas, layout.main_content, layout.compact);
     } else {
-        canvas.fill_ellipse(puck_area.center_x(), puck_rect.center_y() + puck_size * 0.26f,
-                            puck_size * 0.48f, puck_size * 0.38f, hex(0x141a14, 0.8f));
-        canvas.fill_ellipse(puck_area.center_x(), puck_rect.center_y() + puck_size * 0.18f,
-                            puck_size * 0.32f, puck_size * 0.26f, hex(0x1a211a, 0.55f));
-
+        if (!puck_.is_3d()) {
+            draw_call_backdrop(canvas, layout.main, layout.puck, time_seconds,
+                               call_.speaking || call_.output_level > 0.02f);
+        }
         PuckVisual visual = visual_;
         visual.speaking = call_.speaking;
         visual.listening = call_.phase == CallPhase::Active && !call_.muted;
         visual.thinking = call_.thinking;
         visual.not_listening = call_.muted;
         visual.mouth = call_.mouth;
-        puck_.draw(canvas, puck_rect, visual, time_seconds);
-
-        float caption_size = portrait ? 36.0f : 44.0f;
-        while (caption_size > 22.0f && canvas.measure_text(caption_size, call_.caption) > width * 0.84f) {
-            caption_size -= 2.0f;
-        }
-        const float caption_top = stage_height - (portrait ? 100.0f : 72.0f);
-        canvas.text(width * 0.5f, caption_top, caption_size, foreground, TextAlign::Center,
-                    call_.caption);
-
-        if (!call_.detail.empty()) {
-            draw_wrapped_text(canvas, width * 0.5f, caption_top + caption_size * 0.9f,
-                              portrait ? 18.0f : 20.0f, muted_text, call_.detail, width * 0.78f, 2);
-        } else if (connecting) {
-            canvas.text(width * 0.5f, caption_top + caption_size * 0.9f, 18.0f, muted_text,
-                        TextAlign::Center, "Setting up the voice channel");
-        }
+        puck_.draw(canvas, layout.puck, visual, time_seconds);
+        draw_call_caption(canvas, layout, call_);
     }
 
-    draw_status_dot(canvas, width - 150.0f, 30.0f, call_.phase);
-    canvas.text(width - 28.0f, 30.0f, 16.0f, muted_text, TextAlign::Right,
-                ended ? "Call ended" : failed ? "Call failed" : connecting ? "Connecting" : "Connected");
-    canvas.text(28.0f, 30.0f, 18.0f, muted_text, TextAlign::Left, "puck-kiosk");
-
     if (media_ && media_->visible()) {
-        media_->draw(canvas, puck_area);
-        const MediaButtons buttons = media_->buttons(canvas, puck_area);
+        media_->draw(canvas, layout.overlay, layout.compact);
+        const MediaButtons buttons = media_->buttons(canvas, layout.overlay, layout.compact);
         add_target(buttons.close, UiAction::MediaClose);
         if (buttons.can_previous) {
             add_target(buttons.previous, UiAction::MediaPrevious);
@@ -298,121 +821,141 @@ void CarUi::draw_call(Canvas& canvas, Size size, float time_seconds) {
     }
 
     if (sheet_.kind != PluginSheetKind::None) {
-        draw_sheet(canvas, puck_area);
+        draw_sheet(canvas, layout.overlay, layout.compact);
     }
 
-    const float controls_y = height - (portrait ? 116.0f : 108.0f);
-    const float button_height = portrait ? 76.0f : 72.0f;
-    const float button_width = std::min(width * 0.34f, 260.0f);
-    const float gap = 24.0f;
-
-    const bool passkey_button = (passkey_.confirm_button || passkey_.confirming) && !in_call;
-    if (passkey_button) {
-        const float pill_width = std::min(width * 0.46f, 420.0f);
-        const Rect pill{width * 0.5f - pill_width * 0.5f, controls_y - button_height * 0.5f,
-                        pill_width, button_height};
-        if (passkey_.confirming) {
-            draw_pill(canvas, pill, hex(0x2a332a), hex(0x9ca49c), "Confirming\u2026", 26.0f);
-        } else {
-            draw_pill(canvas, pill, hex(0x5fd08a), hex(0x0b160e), "Confirm Passkey", 26.0f);
-            add_target(pill, UiAction::PasskeyConfirm);
-        }
-    } else if (!in_call) {
-        const float pill_width = std::min(width * 0.42f, 320.0f);
-        const Rect pill{width * 0.5f - pill_width * 0.5f, controls_y - button_height * 0.5f,
-                        pill_width, button_height};
-        if (passkey_.mode == PasskeyMode::Phone) {
-            // The actor is read-only until the passkey is confirmed on the phone.
-            draw_pill(canvas, pill, hex(0x1f3a28), hex(0x6f8a75), "Call Puck", 26.0f);
-        } else {
-            draw_pill(canvas, pill, hex(0x5fd08a), hex(0x0b160e),
-                      failed ? "Try Again" : "Call Puck", 26.0f);
-            add_target(pill, UiAction::Call);
-        }
-    } else {
-        const float total_width = button_width * 2.0f + gap;
-        const float left = width * 0.5f - total_width * 0.5f;
-        const Rect mute_button{left, controls_y - button_height * 0.5f, button_width, button_height};
-        const Rect end_button{left + button_width + gap, controls_y - button_height * 0.5f,
-                              button_width, button_height};
-        if (call_.muted) {
-            draw_pill(canvas, mute_button, hex(0xd9e6d8), hex(0x121712), "Unmute", 26.0f);
-        } else {
-            draw_pill(canvas, mute_button, hex(0x232b23), foreground, "Mute", 26.0f);
-        }
-        if (!connecting && !failed) {
-            add_target(mute_button, UiAction::Mute);
-        }
-        draw_pill(canvas, end_button, hex(0xd6453f), hex(0xfff7f6), "End", 26.0f);
-        add_target(end_button, UiAction::End);
-    }
-
-    draw_debug_entry(canvas, size);
+    draw_call_controls(canvas, layout, call_, passkey_, split, hits_);
+    add_debug_target(canvas, size, false);
 }
 
-void CarUi::draw_passkey(Canvas& canvas, Rect stage) {
-    const Color foreground = hex(0xf6fff5);
-    const Color muted = hex(0x9ca49c);
-    const Color secondary = hex(0x232b23);
-
-    const float content_width = std::min(stage.w * 0.82f, 900.0f);
-    const float left = stage.center_x() - content_width * 0.5f;
-    float y = stage.y + (stage.h < 420.0f ? 34.0f : 52.0f);
-
-    const float title_size = stage.h < 420.0f ? 34.0f : 44.0f;
-    canvas.text(stage.center_x(), y + title_size * 0.8f, title_size, foreground,
-                TextAlign::Center, fit_text(canvas, title_size, passkey_.title, content_width));
-    y += title_size + 34.0f;
-
-    for (std::size_t i = 0; i < passkey_.steps.size(); ++i) {
-        const PasskeyStep& step = passkey_.steps[i];
-        const float number_radius = stage.h < 420.0f ? 20.0f : 26.0f;
-        const float number_x = left + number_radius;
-        const float number_y = y + number_radius;
-        canvas.fill_circle(number_x, number_y, number_radius, secondary);
-        canvas.text(number_x, number_y + 8.0f, number_radius * 0.9f, foreground,
-                    TextAlign::Center, std::to_string(i + 1));
-
-        const float text_left = left + number_radius * 2.0f + 20.0f;
-        const float step_size = stage.h < 420.0f ? 25.0f : 32.0f;
-        const float detail_size = stage.h < 420.0f ? 17.0f : 20.0f;
-        canvas.text(text_left, y + number_radius + 2.0f, step_size, foreground, TextAlign::Left,
-                    fit_text(canvas, step_size, step.title, stage.w - text_left - 24.0f));
-        if (!step.detail.empty()) {
-            canvas.text(text_left, y + number_radius + step_size + 14.0f, detail_size, muted,
-                        TextAlign::Left,
-                        fit_text(canvas, detail_size, step.detail, stage.w - text_left - 24.0f));
-        }
-        y += number_radius * 2.0f + (step.detail.empty() ? 16.0f : 40.0f);
+void CarUi::draw_passkey(Canvas& canvas, Rect area, bool compact) {
+    if (passkey_.title.empty() && passkey_.steps.empty()) {
+        return;
     }
+    const float pad_x = compact ? 24.0f : 40.0f;
+    const float content_width = std::min(area.w - pad_x * 2.0f, 896.0f);
+    const float left = area.center_x() - content_width * 0.5f;
 
+    const float title_size = compact ? 40.0f : 48.0f;
+    const float title_line = compact ? 50.0f : 60.0f;
+    const TextStyle title_style =
+        type(title_size, kForeground, TextAlign::Center, FontWeight::Semibold, -0.025f);
+    const float section_gap = compact ? 28.0f : 40.0f;
+    const float steps_gap = compact ? 24.0f : 28.0f;
+    const float number_size = compact ? 48.0f : 64.0f;
+    const float step_size = compact ? 28.0f : 40.0f;
+    const float step_line = compact ? 34.0f : 40.0f;
+    const float detail_size = compact ? 22.0f : 24.0f;
+    const float detail_line = compact ? 30.0f : 33.0f;
+    const TextStyle step_style = type(step_size, kForeground, TextAlign::Left, FontWeight::Medium);
+    const TextStyle detail_style = type(detail_size, kMuted, TextAlign::Left);
+    const TextStyle number_style =
+        type(compact ? 24.0f : 30.0f, kForeground, TextAlign::Center, FontWeight::Semibold);
+
+    const float text_width = content_width - number_size - 24.0f;
+    float total = 0.0f;
+    std::vector<float> step_heights;
+    std::vector<std::vector<std::string>> step_titles;
+    std::vector<std::vector<std::string>> step_details;
+    for (const PasskeyStep& step : passkey_.steps) {
+        const std::vector<std::string> titles =
+            wrap_text(canvas, step_style, step.title, text_width);
+        const std::vector<std::string> details =
+            step.detail.empty() ? std::vector<std::string>{}
+                                : wrap_text(canvas, detail_style, step.detail, text_width);
+        const float text_height = 8.0f + static_cast<float>(titles.size()) * step_line +
+                                  (details.empty()
+                                       ? 0.0f
+                                       : 4.0f + static_cast<float>(details.size()) * detail_line);
+        step_heights.push_back(std::max(number_size, text_height));
+        step_titles.push_back(titles);
+        step_details.push_back(details);
+        total += step_heights.back();
+    }
+    total += static_cast<float>(step_heights.size() > 0 ? step_heights.size() - 1 : 0) * steps_gap;
+    const float title_height =
+        static_cast<float>(wrap_text(canvas, title_style, passkey_.title, content_width).size()) *
+        title_line;
+    total += title_height + section_gap;
     if (!passkey_.status.empty()) {
-        canvas.text(stage.center_x(), stage.y + stage.h - 18.0f, 17.0f,
-                    passkey_.mode == PasskeyMode::Failed ? hex(0xe0524b) : muted,
-                    TextAlign::Center, passkey_.status);
+        total += 12.0f + 24.0f;
+    }
+
+    float top = area.center_y() - total * 0.5f;
+    top = std::max(area.y, top);
+    draw_wrapped_center(canvas, area.center_x(), top, title_style, title_line, passkey_.title,
+                        content_width);
+    float y = top + title_height + section_gap;
+    for (std::size_t i = 0; i < passkey_.steps.size(); ++i) {
+        const float number_center_y = y + number_size * 0.5f;
+        canvas.fill_circle(left + number_size * 0.5f, number_center_y, number_size * 0.5f,
+                           kSecondary);
+        canvas.text(left + number_size * 0.5f, number_center_y, number_style,
+                    std::to_string(i + 1));
+        const float text_left = left + number_size + 24.0f;
+        float text_y = y + 8.0f;
+        for (const std::string& line : step_titles[i]) {
+            text_in_line(canvas, text_left, text_y, step_line, step_style, line);
+            text_y += step_line;
+        }
+        if (!step_details[i].empty()) {
+            text_y += 4.0f;
+            for (const std::string& line : step_details[i]) {
+                text_in_line(canvas, text_left, text_y, detail_line, detail_style, line);
+                text_y += detail_line;
+            }
+        }
+        y += step_heights[i] + steps_gap;
+    }
+    if (!passkey_.status.empty()) {
+        const Color color = passkey_.mode == PasskeyMode::Failed ? kDestructive : kMuted;
+        canvas.text(area.center_x(), y + 12.0f, type(17.0f, color, TextAlign::Center),
+                    fit_text(canvas, type(17.0f, color), passkey_.status, content_width));
     }
 }
 
-void CarUi::draw_sheet(Canvas& canvas, Rect stage) {
-    add_target(stage, UiAction::None);
-    canvas.fill_rect(stage, hex(0x0b0d0b));
+void CarUi::draw_sheet(Canvas& canvas, Rect area, bool compact) {
+    add_target(area, UiAction::None);
+    canvas.fill_rect(area, kBackground);
 
-    const Color foreground = hex(0xf6fff5);
-    const Color muted = hex(0x9ca49c);
-    const Color secondary = hex(0x232b23);
-    const float content_width = std::min(stage.w * 0.78f, 900.0f);
-    const float left = stage.center_x() - content_width * 0.5f;
+    const float pad_x = compact ? 16.0f : 40.0f;
+    const float content_width = std::min(area.w - pad_x * 2.0f, 896.0f);
+    const float left = area.center_x() - content_width * 0.5f;
+    const float gap = compact ? 20.0f : 32.0f;
 
     if (sheet_.kind == PluginSheetKind::Phone) {
-        const float center_y = stage.center_y();
-        draw_phone_icon(canvas, stage.center_x(), center_y - 96.0f, 42.0f, foreground);
-        canvas.text(stage.center_x(), center_y - 18.0f, 34.0f, foreground, TextAlign::Center,
-                    "Answer on Your Phone");
-        canvas.text(stage.center_x(), center_y + 18.0f, 21.0f, muted, TextAlign::Center,
-                    fit_text(canvas, 21.0f, sheet_.title, content_width));
-        const float ok_width = std::min(240.0f, content_width);
-        const Rect ok{stage.center_x() - ok_width * 0.5f, center_y + 56.0f, ok_width, 62.0f};
-        draw_pill(canvas, ok, secondary, foreground, "OK", 24.0f);
+        const float icon_size = compact ? 48.0f : 64.0f;
+        const float title_size = compact ? 24.0f : 40.0f;
+        const float title_line = compact ? 32.0f : 40.0f;
+        const float subtitle_size = compact ? 18.0f : 24.0f;
+        const float subtitle_line = compact ? 24.0f : 32.0f;
+        const float ok_height = compact ? 48.0f : 80.0f;
+        const float ok_size = compact ? 18.0f : 24.0f;
+        const float ok_pad = compact ? 24.0f : 56.0f;
+        const TextStyle title_style =
+            type(title_size, kForeground, TextAlign::Center, FontWeight::Semibold);
+        const TextStyle subtitle_style = type(subtitle_size, kMuted, TextAlign::Center);
+        const std::vector<std::string> subtitles =
+            wrap_text(canvas, subtitle_style, sheet_.title, content_width);
+        const float subtitle_height =
+            static_cast<float>(subtitles.size()) * subtitle_line;
+        const float ok_width =
+            std::min(content_width, canvas.measure_text(type(ok_size, kWhite), "OK") + ok_pad * 2.0f);
+        const float total = icon_size + gap + title_line + gap + subtitle_height + gap + ok_height;
+        float y = area.center_y() - total * 0.5f;
+        draw_call_icon(canvas, area.center_x(), y + icon_size * 0.5f, icon_size, kMuted);
+        y += icon_size + gap;
+        text_in_line(canvas, area.center_x(), y, title_line, title_style, "Answer on Your Phone");
+        y += title_line + gap;
+        for (const std::string& line : subtitles) {
+            text_in_line(canvas, area.center_x(), y, subtitle_line, subtitle_style, line);
+            y += subtitle_line;
+        }
+        y += gap;
+        const Rect ok{area.center_x() - ok_width * 0.5f, y, ok_width, ok_height};
+        canvas.fill_rounded_rect(ok, ok_height * 0.5f, kSecondary);
+        canvas.text(ok.center_x(), ok.center_y(), type(ok_size, kForeground, TextAlign::Center),
+                    "OK");
         add_target(ok, UiAction::SheetOk);
         return;
     }
@@ -420,167 +963,231 @@ void CarUi::draw_sheet(Canvas& canvas, Rect stage) {
     const bool confirm = sheet_.kind == PluginSheetKind::Confirm;
     const std::size_t count = confirm ? 2 : sheet_.options.size();
     const bool dense = count > 4;
-    const float option_height = dense ? 60.0f : (stage.h < 420.0f ? 62.0f : 84.0f);
-    const float gap = dense ? 12.0f : 16.0f;
+    const float option_height =
+        compact ? (dense ? 48.0f : 64.0f) : (dense ? 64.0f : 96.0f);
+    const float option_gap = dense ? 12.0f : 20.0f;
     const int columns = 2;
     const int rows = static_cast<int>((count + columns - 1) / columns);
-    const float dismiss_height = 58.0f;
-    const float title_size = 34.0f;
-    // The car page shows the request title as a small line above the message,
-    // and promotes the message to the heading when one is present.
+    const float title_size = compact ? 24.0f : 40.0f;
+    const float title_line = compact ? 32.0f : 40.0f;
+    const float eyebrow_size = compact ? 18.0f : 24.0f;
+    const float eyebrow_line = compact ? 24.0f : 32.0f;
+    const float dismiss_height = compact ? 48.0f : 64.0f;
+    const float dismiss_size = compact ? 18.0f : 24.0f;
+    const TextStyle title_style =
+        type(title_size, kForeground, TextAlign::Center, FontWeight::Semibold);
+    const TextStyle eyebrow_style = type(eyebrow_size, kMuted, TextAlign::Center);
+    const TextStyle option_style = type(
+        compact ? (dense ? 18.0f : 20.0f) : (dense ? 24.0f : 30.0f), kForeground,
+        TextAlign::Center, FontWeight::Medium);
+
     const bool has_eyebrow = !sheet_.message.empty();
     const std::string eyebrow = has_eyebrow ? sheet_.title : std::string{};
     const std::string heading = has_eyebrow ? sheet_.message : sheet_.title;
-    const float grid_height = rows > 0 ? rows * option_height + (rows - 1) * gap : 0.0f;
-    const float total_height = (has_eyebrow ? 26.0f : 0.0f) + title_size + 22.0f + 14.0f +
-                               grid_height + 22.0f + dismiss_height;
-    float y = stage.y + std::max(16.0f, (stage.h - total_height) * 0.5f);
-    if (has_eyebrow) {
-        canvas.text(stage.center_x(), y + 14.0f, 19.0f, muted, TextAlign::Center,
-                    fit_text(canvas, 19.0f, eyebrow, content_width));
-        y += 26.0f;
-    }
-    canvas.text(stage.center_x(), y + title_size * 0.8f, title_size, foreground, TextAlign::Center,
-                fit_text(canvas, title_size, heading, content_width));
-    y += title_size + 22.0f;
-    y += 14.0f;
+    const std::vector<std::string> headings =
+        wrap_text(canvas, title_style, heading, content_width);
+    const float header_height =
+        (has_eyebrow ? eyebrow_line + 12.0f : 0.0f) +
+        static_cast<float>(std::max<std::size_t>(1, headings.size())) * title_line;
+    const float grid_height = rows > 0 ? rows * option_height + (rows - 1) * option_gap : 0.0f;
+    const float total = header_height + gap + grid_height + gap + dismiss_height;
+    float y = std::max(area.y + 8.0f, area.center_y() - total * 0.5f);
 
-    const float dismiss_limit = stage.y + stage.h - 16.0f - dismiss_height;
-    const float available = dismiss_limit - 12.0f - y;
-    float dismiss_top = y + grid_height + 22.0f;
-    if (grid_height > available && rows > 0) {
-        // Our canvas has no scrolling; compress the grid so Dismiss stays on
-        // screen for unusually long option lists.
-        const float compressed = std::max(44.0f, (available - (rows - 1) * gap) / rows);
-        const float button_width = (content_width - gap * (columns - 1)) / columns;
+    if (has_eyebrow) {
+        text_in_line(canvas, area.center_x(), y, eyebrow_line, eyebrow_style,
+                     fit_text(canvas, eyebrow_style, eyebrow, content_width));
+        y += eyebrow_line + 12.0f;
+    }
+    for (const std::string& line : headings) {
+        text_in_line(canvas, area.center_x(), y, title_line, title_style, line);
+        y += title_line;
+    }
+    y += gap;
+
+    const float button_width = (content_width - option_gap * (columns - 1)) / columns;
+    float grid_bottom = y + grid_height;
+    const float dismiss_limit = area.y + area.h - 8.0f - dismiss_height;
+    if (grid_bottom + gap + dismiss_height > area.y + area.h - 8.0f && rows > 0) {
+        const float available = dismiss_limit - gap - y;
+        const float compressed =
+            std::max(44.0f, (available - (rows - 1) * option_gap) / static_cast<float>(rows));
+        grid_bottom = y + rows * compressed + (rows - 1) * option_gap;
         for (std::size_t i = 0; i < count; ++i) {
             const int column = static_cast<int>(i) % columns;
             const int row = static_cast<int>(i) / columns;
-            const Rect button{left + column * (button_width + gap), y + row * (compressed + gap),
+            const Rect button{left + static_cast<float>(column) * (button_width + option_gap),
+                              y + static_cast<float>(row) * (compressed + option_gap),
                               button_width, compressed};
             const std::string label = confirm ? (i == 0 ? sheet_.confirm_label : "No")
                                               : sheet_.options[i];
-            draw_pill(canvas, button, secondary, foreground, fit_text(canvas, 22.0f, label, button.w - 24.0f),
-                      22.0f);
+            canvas.fill_rounded_rect(button, 16.0f, kSecondary);
+            canvas.text(button.center_x(), button.center_y(), option_style,
+                        fit_text(canvas, option_style, label, button.w - 24.0f));
             add_target(button, UiAction::SheetOption, static_cast<int>(i));
         }
-        dismiss_top = y + rows * compressed + (rows - 1) * gap + 22.0f;
     } else {
-        const float button_width = (content_width - gap * (columns - 1)) / columns;
         for (std::size_t i = 0; i < count; ++i) {
             const int column = static_cast<int>(i) % columns;
             const int row = static_cast<int>(i) / columns;
-            const Rect button{left + column * (button_width + gap), y + row * (option_height + gap),
+            const Rect button{left + static_cast<float>(column) * (button_width + option_gap),
+                              y + static_cast<float>(row) * (option_height + option_gap),
                               button_width, option_height};
             const std::string label = confirm ? (i == 0 ? sheet_.confirm_label : "No")
                                               : sheet_.options[i];
-            const float font = dense ? 19.0f : (stage.h < 420.0f ? 21.0f : 25.0f);
-            canvas.fill_rounded_rect(button, 16.0f, secondary);
-            canvas.text(button.center_x(), button.center_y() + font * 0.36f, font, foreground,
-                        TextAlign::Center, fit_text(canvas, font, label, button.w - 24.0f));
+            canvas.fill_rounded_rect(button, 16.0f, kSecondary);
+            canvas.text(button.center_x(), button.center_y(), option_style,
+                        fit_text(canvas, option_style, label, button.w - 24.0f));
             add_target(button, UiAction::SheetOption, static_cast<int>(i));
         }
     }
 
-    const float dismiss_width = std::min(220.0f, content_width);
-    dismiss_top = std::min(dismiss_top, dismiss_limit);
-    const Rect dismiss{stage.center_x() - dismiss_width * 0.5f, dismiss_top, dismiss_width,
+    const TextStyle dismiss_style = type(dismiss_size, kMuted, TextAlign::Center);
+    const float dismiss_width =
+        std::min(content_width, canvas.measure_text(dismiss_style, "Dismiss") + 80.0f);
+    const float dismiss_top = std::min(grid_bottom + gap, dismiss_limit);
+    const Rect dismiss{area.center_x() - dismiss_width * 0.5f, dismiss_top, dismiss_width,
                        dismiss_height};
-    canvas.text(dismiss.center_x(), dismiss.center_y() + 8.0f, 21.0f, muted, TextAlign::Center,
-                "Dismiss");
+    canvas.text(dismiss.center_x(), dismiss.center_y(), dismiss_style, "Dismiss");
     add_target(dismiss, UiAction::SheetDismiss);
 }
 
 void CarUi::draw_debug(Canvas& canvas, Size size) {
     const float width = static_cast<float>(size.width);
     const float height = static_cast<float>(size.height);
-    const Color foreground = hex(0xf6fff5);
-    const Color muted = hex(0x9ca49c);
-    const Color secondary = hex(0x232b23);
-    const Color selected = hex(0xf0f4ef);
+    const bool compact = compact_layout(size);
+    const float pad = compact ? 16.0f : 40.0f;
+    const float bar_height = compact ? 56.0f : 96.0f;
+    const float heading_size = compact ? 20.0f : 30.0f;
+    const float close_height = compact ? 44.0f : 80.0f;
+    const float close_size = compact ? 16.0f : 24.0f;
+    const float close_pad = compact ? 20.0f : 48.0f;
+    const float row_height = compact ? 44.0f : 64.0f;
+    const float row_size = compact ? 16.0f : 20.0f;
+    const float pill_pad = compact ? 16.0f : 28.0f;
+    const float action_gap = compact ? 12.0f : 32.0f;
 
-    canvas.fill_rect(Rect{0.0f, 0.0f, width, height}, hex(0x0b0d0b));
-    canvas.text(40.0f, 52.0f, 30.0f, foreground, TextAlign::Left, "Debug");
+    canvas.fill_rect(Rect{0.0f, 0.0f, width, height}, kBackground);
+    canvas.text(pad + kSafeLeft, bar_height * 0.5f,
+                type(heading_size, kForeground, TextAlign::Left, FontWeight::Semibold), "Debug");
 
-    const Rect close{width - 180.0f, 20.0f, 140.0f, 64.0f};
-    draw_pill(canvas, close, secondary, foreground, "Close", 22.0f);
+    const TextStyle close_style = type(close_size, kForeground, TextAlign::Center,
+                                       FontWeight::Medium);
+    const float close_width =
+        canvas.measure_text(close_style, "Close") + close_pad * 2.0f;
+    const Rect close{width - pad - kSafeRight - close_width, (bar_height - close_height) * 0.5f,
+                     close_width, close_height};
+    canvas.fill_rounded_rect(close, close_height * 0.5f, kSecondary);
+    canvas.text(close.center_x(), close.center_y(), close_style, "Close");
     add_target(close, UiAction::DebugClose);
 
-    const bool narrow = width < 1100.0f;
-    float actions_y = 100.0f;
-    canvas.text(40.0f, actions_y + 36.0f, 19.0f, muted, TextAlign::Left, "Echo Cancellation");
+    const TextStyle label_style = type(row_size, kMuted);
+    const TextStyle pill_style = type(row_size, kForeground, TextAlign::Center,
+                                      FontWeight::Medium);
+    float x = pad + kSafeLeft;
+    float row_top = bar_height;
+    const float row_center = row_top + row_height * 0.5f;
+    canvas.text(x, row_center, label_style, "Echo Cancellation");
+    x += canvas.measure_text(label_style, "Echo Cancellation") + 12.0f;
 
     struct ModePill {
         const char* label;
         EchoCancellationMode mode;
-        float width;
     };
     const ModePill modes[] = {
-        {"On", EchoCancellationMode::On, 90.0f},
-        {"Remote Only", EchoCancellationMode::RemoteOnly, 170.0f},
-        {"Off", EchoCancellationMode::Off, 90.0f},
+        {"On", EchoCancellationMode::On},
+        {"Remote Only", EchoCancellationMode::RemoteOnly},
+        {"Off", EchoCancellationMode::Off},
     };
-    float x = 230.0f;
-    for (int i = 0; i < 3; ++i) {
-        const Rect pill{x, actions_y, modes[i].width, 56.0f};
-        const bool active = debug_.echo == modes[i].mode;
-        draw_pill(canvas, pill, active ? selected : secondary, active ? hex(0x121712) : foreground,
-                  modes[i].label, 19.0f);
-        add_target(pill, UiAction::EchoMode, i);
-        x += modes[i].width + 12.0f;
+    for (const ModePill& mode : modes) {
+        const float pill_width = canvas.measure_text(pill_style, mode.label) + pill_pad * 2.0f;
+        const Rect pill{x, row_top, pill_width, row_height};
+        const bool active = debug_.echo == mode.mode;
+        canvas.fill_rounded_rect(pill, row_height * 0.5f, active ? kForeground : kSecondary);
+        canvas.text(pill.center_x(), pill.center_y(),
+                    type(row_size, active ? kBackground : kForeground, TextAlign::Center,
+                         FontWeight::Medium),
+                    mode.label);
+        add_target(pill, UiAction::EchoMode, static_cast<int>(&mode - modes));
+        x += pill_width + 12.0f;
     }
 
-    float buttons_y = actions_y;
-    if (narrow) {
-        actions_y += 72.0f;
-        buttons_y = actions_y;
-        x = 40.0f;
-    }
-    const Rect mic{x, buttons_y, 210.0f, 56.0f};
+    x += action_gap;
+    const float mic_width = canvas.measure_text(pill_style, "Test Microphone") + 32.0f * 2.0f;
+    const Rect mic{x, row_top, mic_width, row_height};
     if (debug_.mic_busy) {
-        draw_pill(canvas, mic, hex(0x1a211a), hex(0x6b746b), "Test Microphone", 19.0f);
+        canvas.fill_rounded_rect(mic, row_height * 0.5f, hex(0x1a211a));
+        canvas.text(mic.center_x(), mic.center_y(),
+                    type(row_size, kMuted, TextAlign::Center, FontWeight::Medium),
+                    "Test Microphone");
     } else {
-        draw_pill(canvas, mic, secondary, foreground, "Test Microphone", 19.0f);
+        canvas.fill_rounded_rect(mic, row_height * 0.5f, kSecondary);
+        canvas.text(mic.center_x(), mic.center_y(), pill_style, "Test Microphone");
         add_target(mic, UiAction::MicTest);
     }
-    const Rect send{x + 226.0f, buttons_y, 220.0f, 56.0f};
+    x += mic_width + action_gap;
+
     if (debug_.can_send) {
-        draw_pill(canvas, send, secondary, foreground, "Send Diagnostics", 19.0f);
+        const float send_width =
+            canvas.measure_text(pill_style, "Send Diagnostics") + 32.0f * 2.0f;
+        const Rect send{x, row_top, send_width, row_height};
+        canvas.fill_rounded_rect(send, row_height * 0.5f, kSecondary);
+        canvas.text(send.center_x(), send.center_y(), pill_style, "Send Diagnostics");
         add_target(send, UiAction::SendDiagnostics);
-    } else {
-        draw_pill(canvas, send, hex(0x1a211a), hex(0x6b746b), "Send Diagnostics", 19.0f);
+        x += send_width + action_gap;
     }
+
     const std::string status =
         !debug_.can_send ? "Sign in to send"
         : debug_.send_status.empty() ? "Echo setting applies to the next call"
                                      : debug_.send_status;
-    const float status_y = narrow ? buttons_y + 78.0f : actions_y + 78.0f;
-    canvas.text(40.0f, status_y, 17.0f, muted, TextAlign::Left,
-                fit_text(canvas, 17.0f, status, width - 80.0f));
+    const TextStyle status_style = type(row_size, kMuted);
+    const float status_width = canvas.measure_text(status_style, status);
+    if (x + status_width > width - pad - kSafeRight) {
+        row_top += row_height + (compact ? 12.0f : 16.0f);
+        x = pad + kSafeLeft;
+    }
+    canvas.text(x, row_top + row_height * 0.5f, status_style,
+                fit_text(canvas, status_style, status, width - pad - x));
 
-    float row_y = status_y + 30.0f;
-    const float row_height = 28.0f;
-    const int max_rows = std::max(0, static_cast<int>((height - row_y - 16.0f) / row_height));
+    const float rows_top = row_top + row_height + (compact ? 16.0f : 24.0f);
+    const float label_width = compact ? 120.0f : 208.0f;
+    const float value_gap = compact ? 12.0f : 24.0f;
+    const float value_x = pad + label_width + value_gap;
+    const float debug_row_line = compact ? 20.0f : 28.0f;
+    const float debug_row_height = compact ? 28.0f : 40.0f;
+    const float debug_row_size = compact ? 14.0f : 20.0f;
+    const int max_rows = std::max(
+        0, static_cast<int>((height - rows_top - 8.0f) / debug_row_height));
     const int rows = static_cast<int>(debug_.rows.size());
     const int shown = std::min(rows, max_rows);
     for (int i = 0; i < shown; ++i) {
         const DebugRow& row = debug_.rows[static_cast<std::size_t>(i)];
-        canvas.text(40.0f, row_y + 18.0f, 18.0f, muted, TextAlign::Left, row.label);
-        canvas.text(250.0f, row_y + 18.0f, 18.0f, foreground, TextAlign::Left,
-                    fit_text(canvas, 18.0f, row.value, width - 290.0f));
-        row_y += row_height;
+        const float y = rows_top + static_cast<float>(i) * debug_row_height;
+        const TextStyle label = type(debug_row_size, kMuted);
+        const TextStyle value = type(debug_row_size, kForeground);
+        text_in_line(canvas, pad + kSafeLeft, y, debug_row_line, label, row.label);
+        text_in_line(canvas, value_x, y, debug_row_line, value,
+                     fit_text(canvas, value, row.value, width - value_x - pad - kSafeRight));
     }
     if (shown < rows) {
-        canvas.text(40.0f, row_y + 18.0f, 16.0f, muted, TextAlign::Left,
+        const float y = rows_top + static_cast<float>(shown) * debug_row_height;
+        canvas.text(pad + kSafeLeft, y + debug_row_line * 0.5f,
+                    type(compact ? 13.0f : 16.0f, kMuted),
                     "+" + std::to_string(rows - shown) + " more");
     }
 }
 
-void CarUi::draw_debug_entry(Canvas& canvas, Size size) {
-    const Rect entry{20.0f, static_cast<float>(size.height) - 62.0f, 116.0f, 42.0f};
-    canvas.fill_rounded_rect(entry, 21.0f, hex(0xffffff, 0.05f));
-    canvas.text(entry.center_x(), entry.center_y() + 6.0f, 16.0f, hex(0xf6fff5, 0.28f),
-                TextAlign::Center, "Debug");
+void CarUi::add_debug_target(Canvas& canvas, Size size, bool pairing) {
+    const bool compact = compact_layout(size);
+    const float debug_height = compact ? 44.0f : 64.0f;
+    const float debug_font = compact ? 16.0f : 20.0f;
+    const float debug_pad = compact ? 16.0f : 24.0f;
+    const float margin = compact ? 12.0f : (pairing ? 40.0f : 24.0f);
+    const float debug_width =
+        canvas.measure_text(type(debug_font, kForeground), "Debug") + debug_pad * 2.0f;
+    const Rect entry{margin + kSafeLeft, static_cast<float>(size.height) - margin - debug_height -
+                                              kSafeBottom,
+                     debug_width, debug_height};
     add_target(entry, UiAction::DebugOpen);
 }
 

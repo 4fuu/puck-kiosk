@@ -28,15 +28,15 @@ public:
     void stroke_circle(float center_x, float center_y, float radius, float width, Color color) override;
     void stroke_line(float x0, float y0, float x1, float y1, float width, Color color) override;
 
-    void text(float x, float y, float size, Color color, TextAlign align,
-              const std::string& value) override;
-    float measure_text(float size, const std::string& value) override;
+    void text(float x, float y, const TextStyle& style, const std::string& value) override;
+    float measure_text(const TextStyle& style, const std::string& value) override;
 
 private:
     NVGcontext* context_ = nullptr;
     Size size_;
     float dpi_scale_ = 1.0f;
     bool frame_open_ = false;
+    bool bold_face_ = false;
 };
 
 }  // namespace pk

@@ -108,6 +108,18 @@ target("ui-tests")
     add_links("m", "pthread", "png", "webp", "jpeg")
     set_warnings("all", "extra")
 
+target("ui-render-tests")
+    set_kind("binary")
+    set_default(false)
+    set_rundir("$(projectdir)")
+    add_deps("nanovg")
+    add_files("tests/ui_render_tests.cpp", "src/app/car_ui.cpp", "src/app/media_overlay.cpp",
+              "src/app/ui_input.cpp", "src/core/log.cpp", "src/render/renderer.cpp",
+              "src/render/nanovg_canvas.cpp", "src/platform/headless/headless_display.cpp")
+    add_includedirs("src", "third_party")
+    add_links("EGL", "GLESv2", "m", "pthread", "png", "webp", "jpeg")
+    set_warnings("all", "extra")
+
 target("voice-tests")
     set_kind("binary")
     set_default(false)

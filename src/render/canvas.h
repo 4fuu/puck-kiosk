@@ -13,6 +13,32 @@ enum class TextAlign {
     Right,
 };
 
+// Where y sits relative to the glyph box. UI layout normally centers text in a
+// line box (Middle); Baseline is for callers that already know the baseline.
+enum class TextVAlign {
+    Top,
+    Middle,
+    Baseline,
+};
+
+// The car page uses 400, 500, and 600. A backend with a single font face may
+// synthesize the heavier weights.
+enum class FontWeight {
+    Regular,
+    Medium,
+    Semibold,
+};
+
+struct TextStyle {
+    float size = 16.0f;
+    Color color;
+    TextAlign align = TextAlign::Left;
+    TextVAlign valign = TextVAlign::Middle;
+    FontWeight weight = FontWeight::Regular;
+    // Extra spacing per character, in em, matching CSS letter-spacing.
+    float tracking = 0.0f;
+};
+
 // A backend-owned raster texture. Zero means "no image".
 using ImageHandle = std::uint64_t;
 constexpr ImageHandle kInvalidImage = 0;
@@ -50,9 +76,16 @@ public:
     virtual void stroke_circle(float center_x, float center_y, float radius, float width, Color color) = 0;
     virtual void stroke_line(float x0, float y0, float x1, float y1, float width, Color color) = 0;
 
-    virtual void text(float x, float y, float size, Color color, TextAlign align,
-                      const std::string& value) = 0;
-    virtual float measure_text(float size, const std::string& value) = 0;
+    virtual void text(float x, float y, const TextStyle& style, const std::string& value) = 0;
+
+    // Width of the laid-out text, including tracking and synthetic weight.
+    virtual float measure_text(const TextStyle& style, const std::string& value) = 0;
+
+    float measure_text(float size, const std::string& value) {
+        TextStyle style;
+        style.size = size;
+        return measure_text(style, value);
+    }
 };
 
 }  // namespace pk

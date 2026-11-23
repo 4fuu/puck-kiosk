@@ -35,11 +35,12 @@ public:
 private:
     void draw_pairing(Canvas& canvas, Size size, float time_seconds);
     void draw_call(Canvas& canvas, Size size, float time_seconds);
-    void draw_passkey(Canvas& canvas, Rect stage);
-    void draw_sheet(Canvas& canvas, Rect stage);
+    void draw_passkey(Canvas& canvas, Rect area, bool compact);
+    void draw_sheet(Canvas& canvas, Rect area, bool compact);
     void draw_debug(Canvas& canvas, Size size);
-    void draw_debug_entry(Canvas& canvas, Size size);
+    void add_debug_target(Canvas& canvas, Size size, bool pairing);
     void add_target(Rect rect, UiAction action, int index = -1);
+    float control_split(float time_seconds, bool in_call);
 
     PuckView& puck_;
     MediaOverlay* media_ = nullptr;
@@ -54,6 +55,15 @@ private:
     PasskeyView passkey_;
     DebugView debug_;
     UiHitMap hits_;
+
+    // The web page animates the single call button into Mute/End over 400ms
+    // with cubic-bezier(.22, 1, .36, 1). Split is 0 before a call and 1 during
+    // one; the first frame snaps instead of animating in from the wrong place.
+    float control_split_ = -1.0f;
+    float split_from_ = 0.0f;
+    float split_start_ = 0.0f;
+    float split_target_ = 0.0f;
+    float last_draw_time_ = -1.0f;
 };
 
 }  // namespace pk

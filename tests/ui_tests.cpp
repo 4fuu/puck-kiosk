@@ -54,9 +54,9 @@ public:
     void fill_triangle(float, float, float, float, float, float, pk::Color) override {}
     void stroke_circle(float, float, float, float, pk::Color) override {}
     void stroke_line(float, float, float, float, float, pk::Color) override {}
-    void text(float, float, float, pk::Color, pk::TextAlign, const std::string&) override {}
-    float measure_text(float size, const std::string& value) override {
-        return static_cast<float>(value.size()) * size * 0.5f;
+    void text(float, float, const pk::TextStyle&, const std::string&) override {}
+    float measure_text(const pk::TextStyle& style, const std::string& value) override {
+        return static_cast<float>(value.size()) * style.size * 0.5f;
     }
 };
 
@@ -516,6 +516,16 @@ void test_car_ui_targets() {
     CHECK(mute != nullptr);
     CHECK(end != nullptr);
     CHECK(debug != nullptr);
+    // The wide car layout puts End above Mute in the left control rail.
+    CHECK(std::fabs(mute->rect.center_x() - end->rect.center_x()) < 0.5f);
+    CHECK(end->rect.y < mute->rect.y);
+
+    // Portrait keeps the web's horizontal pair, with Mute on the left.
+    ui.draw(canvas, pk::Size{720, 1280}, 0.0f);
+    mute = find_target(ui.hit_map(), pk::UiAction::Mute);
+    end = find_target(ui.hit_map(), pk::UiAction::End);
+    CHECK(mute != nullptr);
+    CHECK(end != nullptr);
     CHECK(mute->rect.x < end->rect.x);
 
     pk::UiInputRouter router;
@@ -564,6 +574,38 @@ void test_car_ui_targets() {
     CHECK(find_target(ui.hit_map(), pk::UiAction::DebugOpen) == nullptr);
 }
 
+void test_control_animation() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+    ui.set_call(pk::CallView{});
+    ui.draw(canvas, pk::Size{1280, 720}, 0.0f);
+    CHECK(find_target(ui.hit_map(), pk::UiAction::Mute) == nullptr);
+
+    pk::CallView active;
+    active.phase = pk::CallPhase::Active;
+    ui.set_call(active);
+    ui.draw(canvas, pk::Size{1280, 720}, 0.0f);
+    const pk::UiTarget* end0 = find_target(ui.hit_map(), pk::UiAction::End);
+    CHECK(end0 != nullptr);
+    const float end_start_y = end0->rect.center_y();
+
+    ui.draw(canvas, pk::Size{1280, 720}, 0.2f);
+    const pk::UiTarget* end2 = find_target(ui.hit_map(), pk::UiAction::End);
+    const pk::UiTarget* mute2 = find_target(ui.hit_map(), pk::UiAction::Mute);
+    CHECK(end2 != nullptr && mute2 != nullptr);
+    CHECK(end2->rect.center_y() < end_start_y);
+    CHECK(mute2->rect.center_y() > end_start_y);
+
+    ui.draw(canvas, pk::Size{1280, 720}, 0.4f);
+    const pk::UiTarget* end4 = find_target(ui.hit_map(), pk::UiAction::End);
+    const pk::UiTarget* mute4 = find_target(ui.hit_map(), pk::UiAction::Mute);
+    CHECK(end4 != nullptr && mute4 != nullptr);
+    CHECK(std::fabs(end4->rect.center_y() - 264.0f) < 1.0f);
+    CHECK(std::fabs(mute4->rect.center_y() - 488.0f) < 1.0f);
+    CHECK(std::fabs(end4->rect.center_x() - end2->rect.center_x()) < 0.5f);
+}
+
 void test_media_buttons() {
     FakeCanvas canvas;
     pk::MediaOverlay media(nullptr, "https://ampcode.com", canvas);
@@ -603,6 +645,7 @@ int main() {
     test_passkey();
     test_diagnostics();
     test_car_ui_targets();
+    test_control_animation();
     test_media_buttons();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

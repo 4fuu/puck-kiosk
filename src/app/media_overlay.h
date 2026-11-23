@@ -71,8 +71,8 @@ public:
     // Uploads finished decodes and releases evicted textures. Call once per
     // frame on the UI thread, before draw().
     void poll();
-    void draw(Canvas& canvas, Rect stage) const;
-    MediaButtons buttons(Canvas& canvas, Rect stage) const;
+    void draw(Canvas& canvas, Rect stage, bool compact = false) const;
+    MediaButtons buttons(Canvas& canvas, Rect stage, bool compact = false) const;
 
     bool visible() const;
     bool settled() const;

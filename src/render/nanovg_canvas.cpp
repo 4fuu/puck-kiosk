@@ -6,6 +6,7 @@
 #include <nanovg_gles3_api.h>
 
 #include <filesystem>
+#include <vector>
 
 namespace pk {
 namespace {
@@ -28,13 +29,67 @@ std::string default_font_path() {
     return {};
 }
 
-int to_align(TextAlign align) {
-    switch (align) {
-        case TextAlign::Left: return NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE;
-        case TextAlign::Center: return NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE;
-        case TextAlign::Right: return NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE;
+std::string bold_sibling(const std::string& path) {
+    namespace fs = std::filesystem;
+    const fs::path font(path);
+    const std::string extension = font.extension().string();
+    const std::string stem = font.stem().string();
+    std::vector<std::string> names;
+    const auto replace = [&](const std::string& from, const std::string& to) {
+        std::string value = stem;
+        const std::size_t position = value.find(from);
+        if (position != std::string::npos) {
+            value.replace(position, from.size(), to);
+            names.push_back(value + extension);
+        }
+    };
+    replace("Regular", "Bold");
+    replace("regular", "bold");
+    names.push_back(stem + "-Bold" + extension);
+    names.push_back(stem + "Bold" + extension);
+    names.push_back(stem + "-Semibold" + extension);
+    for (const std::string& name : names) {
+        const fs::path candidate = font.parent_path() / name;
+        if (fs::exists(candidate)) {
+            return candidate.string();
+        }
     }
-    return NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE;
+    return {};
+}
+
+int to_align(TextAlign align, TextVAlign valign) {
+    int flags = NVG_ALIGN_LEFT;
+    switch (align) {
+        case TextAlign::Left: flags = NVG_ALIGN_LEFT; break;
+        case TextAlign::Center: flags = NVG_ALIGN_CENTER; break;
+        case TextAlign::Right: flags = NVG_ALIGN_RIGHT; break;
+    }
+    switch (valign) {
+        case TextVAlign::Top: return flags | NVG_ALIGN_TOP;
+        case TextVAlign::Middle: return flags | NVG_ALIGN_MIDDLE;
+        case TextVAlign::Baseline: return flags | NVG_ALIGN_BASELINE;
+    }
+    return flags | NVG_ALIGN_MIDDLE;
+}
+
+// NanoVG has one face per font name. Prefer a Bold sibling when the operator
+// font ships one; otherwise synthesize the car page's 500/600 weights by
+// drawing the glyphs twice with a sub-pixel offset.
+float weight_offset(const TextStyle& style, bool bold_face) {
+    switch (style.weight) {
+        case FontWeight::Regular: return 0.0f;
+        case FontWeight::Medium: return style.size * 0.020f;
+        case FontWeight::Semibold: return bold_face ? 0.0f : style.size * 0.035f;
+    }
+    return 0.0f;
+}
+
+void apply_text_state(NVGcontext* context, const TextStyle& style, bool bold_face) {
+    nvgFontFace(context,
+                style.weight == FontWeight::Semibold && bold_face ? "ui-bold" : "ui");
+    nvgFontSize(context, style.size);
+    nvgTextAlign(context, to_align(style.align, style.valign));
+    nvgTextLetterSpacing(context, style.tracking * style.size);
 }
 
 }  // namespace
@@ -69,6 +124,11 @@ bool NanoVgCanvas::initialize(const std::string& font_path, std::string* error) 
         return false;
     }
     log::info("UI font: %s", path.c_str());
+    const std::string bold_path = bold_sibling(path);
+    if (!bold_path.empty() && nvgCreateFont(context_, "ui-bold", bold_path.c_str()) != -1) {
+        bold_face_ = true;
+        log::info("UI bold font: %s", bold_path.c_str());
+    }
     return true;
 }
 
@@ -181,21 +241,29 @@ void NanoVgCanvas::stroke_line(float x0, float y0, float x1, float y1, float wid
     nvgStroke(context_);
 }
 
-void NanoVgCanvas::text(float x, float y, float size, Color color, TextAlign align,
-                        const std::string& value) {
-    nvgFontFace(context_, "ui");
-    nvgFontSize(context_, size);
-    nvgTextAlign(context_, to_align(align));
-    nvgFillColor(context_, to_nvg(color));
-    nvgText(context_, x, y, value.c_str(), nullptr);
+void NanoVgCanvas::text(float x, float y, const TextStyle& style, const std::string& value) {
+    apply_text_state(context_, style, bold_face_);
+    nvgFillColor(context_, to_nvg(style.color));
+    const float offset = weight_offset(style, bold_face_);
+    if (offset <= 0.0f) {
+        nvgText(context_, x, y, value.c_str(), nullptr);
+        return;
+    }
+    float anchor = x;
+    if (style.align == TextAlign::Center) {
+        anchor -= offset * 0.5f;
+    } else if (style.align == TextAlign::Right) {
+        anchor -= offset;
+    }
+    nvgText(context_, anchor, y, value.c_str(), nullptr);
+    nvgText(context_, anchor + offset, y, value.c_str(), nullptr);
 }
 
-float NanoVgCanvas::measure_text(float size, const std::string& value) {
-    nvgFontFace(context_, "ui");
-    nvgFontSize(context_, size);
+float NanoVgCanvas::measure_text(const TextStyle& style, const std::string& value) {
+    apply_text_state(context_, style, bold_face_);
     float bounds[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     nvgTextBounds(context_, 0.0f, 0.0f, value.c_str(), nullptr, bounds);
-    return bounds[2] - bounds[0];
+    return bounds[2] - bounds[0] + weight_offset(style, bold_face_);
 }
 
 }  // namespace pk

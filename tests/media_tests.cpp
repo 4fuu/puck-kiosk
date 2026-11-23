@@ -44,9 +44,9 @@ public:
     void fill_triangle(float, float, float, float, float, float, pk::Color) override {}
     void stroke_circle(float, float, float, float, pk::Color) override {}
     void stroke_line(float, float, float, float, float, pk::Color) override {}
-    void text(float, float, float, pk::Color, pk::TextAlign, const std::string&) override {}
-    float measure_text(float size, const std::string& value) override {
-        return static_cast<float>(value.size()) * size * 0.5f;
+    void text(float, float, const pk::TextStyle&, const std::string&) override {}
+    float measure_text(const pk::TextStyle& style, const std::string& value) override {
+        return static_cast<float>(value.size()) * style.size * 0.5f;
     }
 
     int created = 0;
