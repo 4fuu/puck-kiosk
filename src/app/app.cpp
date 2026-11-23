@@ -196,8 +196,16 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
                   redact_text(token_error).c_str());
     }
 
+    const std::string page_load_id = random_uuid();
+    std::string ready_error;
+    if (wait_actor_ready(*platform.http, session, page_load_id, &ready_error)) {
+        log::info("actor: ready");
+    } else {
+        log::warn("actor ready check: %s", redact_text(ready_error).c_str());
+    }
+
     ActorEndpoint endpoint;
-    if (!build_actor_endpoint(session, random_uuid(), &endpoint, &error)) {
+    if (!build_actor_endpoint(session, page_load_id, &endpoint, &error)) {
         log::error("actor endpoint: %s", error.c_str());
         return 2;
     }

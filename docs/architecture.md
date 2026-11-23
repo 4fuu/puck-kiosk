@@ -137,6 +137,21 @@ client creates a data channel named `puck-webrtc-voice` and sends
 `client_puck_voice_start` with `{ transport: { type: "webrtc", sdp } }`.
 The answer returns `{ sessionID, transport: { sdp } }`.
 
+Actor transport facts verified against the live service:
+
+- The car session must be renewed with `POST /api/car/session` every 30
+  seconds; the server ends it after 180 seconds without activity, so a saved
+  session from an exited process is usually dead and pairing must fall back
+  to a fresh QR.
+- `POST /api/thread-actors` returns HTTP 201 with the `wsToken`.
+- The RivetKit gateway delivers JSON-RPC as binary WebSocket frames
+  (`rivet_encoding.bare`); a text-only receive path sees nothing.
+- With `rvt-skip-ready-wait`, the WebSocket opens before the actor wakes and
+  stays silent. The client first issues `GET {gateway}/connect-ready-check`
+  with the same `rvt-*` query and `Authorization: <wsToken>`; ready means
+  status < 500 and no `x-rivet-error` header. Only then does the actor push
+  `observerSnapshot` and further notifications.
+
 ## Voice stack (M3 decision)
 
 M3 uses libdatachannel + libopus + webrtc-audio-processing, not GStreamer

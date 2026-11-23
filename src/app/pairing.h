@@ -109,6 +109,8 @@ struct ActorEndpoint {
 
 bool build_actor_endpoint(const CarSession& session, const std::string& page_load_id,
                           ActorEndpoint* endpoint, std::string* error);
+bool wait_actor_ready(HttpClient& http, const CarSession& session, const std::string& page_load_id,
+                      std::string* error);
 std::string redact_url(const std::string& url);
 std::string redact_text(const std::string& text, std::size_t max_length = 400);
 std::string redact_json(const std::string& json, std::size_t max_length = 400);

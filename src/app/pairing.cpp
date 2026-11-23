@@ -16,6 +16,7 @@
 #include <random>
 #include <regex>
 #include <sstream>
+#include <thread>
 #include <unordered_set>
 
 namespace pk {
@@ -1097,6 +1098,81 @@ bool build_actor_endpoint(const CarSession& session, const std::string& page_loa
     }
     endpoint->subprotocols.push_back("rivet_conn_params." + url_encode(connection.dump()));
     return true;
+}
+
+bool wait_actor_ready(HttpClient& http, const CarSession& session, const std::string& page_load_id,
+                      std::string* error) {
+    if (error) {
+        error->clear();
+    }
+    ActorEndpoint endpoint;
+    if (!build_actor_endpoint(session, page_load_id, &endpoint, error)) {
+        return false;
+    }
+
+    std::string url = endpoint.url;
+    if (url.rfind("wss://", 0) == 0) {
+        url = "https://" + url.substr(6);
+    } else if (url.rfind("ws://", 0) == 0) {
+        url = "http://" + url.substr(5);
+    }
+    const std::string ws_path = "/websocket/?";
+    const auto path_pos = url.find(ws_path);
+    if (path_pos == std::string::npos) {
+        if (error) {
+            *error = "unexpected actor gateway path";
+        }
+        return false;
+    }
+    url.replace(path_pos, ws_path.size(), "/connect-ready-check?");
+    const std::string skip_param = "&rvt-skip-ready-wait=true";
+    const auto skip_pos = url.find(skip_param);
+    if (skip_pos != std::string::npos) {
+        url.erase(skip_pos, skip_param.size());
+    }
+
+    nlohmann::json connection = {
+        {"browserPageLoadID", page_load_id},
+        {"transport", "json-rpc"},
+    };
+    if (!session.ws_token.empty()) {
+        connection["wsToken"] = session.ws_token;
+    }
+
+    HttpRequest request;
+    request.url = url;
+    request.headers = {
+        {"Authorization", session.ws_token},
+        {"x-rivet-conn-params", connection.dump()},
+        {"Accept", "*/*"},
+        {"User-Agent", kUserAgent},
+    };
+
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        std::string request_error;
+        const HttpResponse response = http.request(request, &request_error);
+        bool rivet_error = false;
+        for (const HttpHeader& header : response.headers) {
+            std::string name = header.name;
+            std::transform(name.begin(), name.end(), name.begin(), [](unsigned char character) {
+                return static_cast<char>(std::tolower(character));
+            });
+            if (name == "x-rivet-error") {
+                rivet_error = true;
+            }
+        }
+        if (response.status > 0 && response.status < 500 && !rivet_error) {
+            return true;
+        }
+        if (error) {
+            *error = "actor ready check returned HTTP " + std::to_string(response.status);
+            if (!request_error.empty()) {
+                *error += ": " + request_error;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    return false;
 }
 
 std::string redact_url(const std::string& url) {
