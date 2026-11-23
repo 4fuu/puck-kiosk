@@ -5,6 +5,9 @@
 #include <nanovg.h>
 #include <nanovg_gles3_api.h>
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <vector>
 
@@ -264,6 +267,129 @@ float NanoVgCanvas::measure_text(const TextStyle& style, const std::string& valu
     float bounds[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     nvgTextBounds(context_, 0.0f, 0.0f, value.c_str(), nullptr, bounds);
     return bounds[2] - bounds[0] + weight_offset(style, bold_face_);
+}
+
+void NanoVgCanvas::fill_path(const std::string& d, Rect view_box, Rect dest, Color color) {
+    if (!context_ || d.empty() || view_box.w <= 0.0f || view_box.h <= 0.0f ||
+        dest.w <= 0.0f || dest.h <= 0.0f) {
+        return;
+    }
+    const float scale = std::min(dest.w / view_box.w, dest.h / view_box.h);
+    const float ox = dest.x + (dest.w - view_box.w * scale) * 0.5f - view_box.x * scale;
+    const float oy = dest.y + (dest.h - view_box.h * scale) * 0.5f - view_box.y * scale;
+    const auto px = [&](float x) { return ox + x * scale; };
+    const auto py = [&](float y) { return oy + y * scale; };
+
+    std::size_t i = 0;
+    const auto skip_sep = [&]() {
+        while (i < d.size() && (d[i] == ' ' || d[i] == ',' || d[i] == '\n' || d[i] == '\t')) {
+            ++i;
+        }
+    };
+    const auto read_num = [&](float* out) {
+        skip_sep();
+        const std::size_t start = i;
+        if (i < d.size() && (d[i] == '-' || d[i] == '+')) {
+            ++i;
+        }
+        while (i < d.size() && (std::isdigit(static_cast<unsigned char>(d[i])) || d[i] == '.')) {
+            ++i;
+        }
+        if (i < d.size() && (d[i] == 'e' || d[i] == 'E')) {
+            ++i;
+            if (i < d.size() && (d[i] == '-' || d[i] == '+')) {
+                ++i;
+            }
+            while (i < d.size() && std::isdigit(static_cast<unsigned char>(d[i]))) {
+                ++i;
+            }
+        }
+        if (i == start) {
+            return false;
+        }
+        *out = std::strtof(d.substr(start, i - start).c_str(), nullptr);
+        return true;
+    };
+
+    float cx = 0, cy = 0, sx = 0, sy = 0, qx = 0, qy = 0, kx = 0, ky = 0;
+    char cmd = 0;
+    nvgBeginPath(context_);
+    while (i < d.size()) {
+        skip_sep();
+        if (i >= d.size()) {
+            break;
+        }
+        if (std::isalpha(static_cast<unsigned char>(d[i]))) {
+            cmd = d[i++];
+        }
+        const bool rel = std::islower(static_cast<unsigned char>(cmd));
+        const char up = static_cast<char>(std::toupper(static_cast<unsigned char>(cmd)));
+        const float bx = rel ? cx : 0.0f;
+        const float by = rel ? cy : 0.0f;
+        float a, b, c, e, f, g;
+        switch (up) {
+            case 'M':
+                if (!read_num(&a) || !read_num(&b)) { i = d.size(); break; }
+                cx = bx + a; cy = by + b; sx = cx; sy = cy;
+                nvgMoveTo(context_, px(cx), py(cy));
+                cmd = rel ? 'l' : 'L';
+                break;
+            case 'L':
+                if (!read_num(&a) || !read_num(&b)) { i = d.size(); break; }
+                cx = bx + a; cy = by + b;
+                nvgLineTo(context_, px(cx), py(cy));
+                break;
+            case 'H':
+                if (!read_num(&a)) { i = d.size(); break; }
+                cx = bx + a;
+                nvgLineTo(context_, px(cx), py(cy));
+                break;
+            case 'V':
+                if (!read_num(&a)) { i = d.size(); break; }
+                cy = by + a;
+                nvgLineTo(context_, px(cx), py(cy));
+                break;
+            case 'C':
+                if (!read_num(&a) || !read_num(&b) || !read_num(&c) || !read_num(&e) ||
+                    !read_num(&f) || !read_num(&g)) { i = d.size(); break; }
+                kx = bx + c; ky = by + e;
+                cx = bx + f; cy = by + g;
+                nvgBezierTo(context_, px(bx + a), py(by + b), px(kx), py(ky), px(cx), py(cy));
+                break;
+            case 'S':
+                if (!read_num(&a) || !read_num(&b) || !read_num(&c) || !read_num(&e)) { i = d.size(); break; }
+                {
+                    const float rx = 2 * cx - kx;
+                    const float ry = 2 * cy - ky;
+                    kx = bx + a; ky = by + b;
+                    cx = bx + c; cy = by + e;
+                    nvgBezierTo(context_, px(rx), py(ry), px(kx), py(ky), px(cx), py(cy));
+                }
+                break;
+            case 'Q':
+                if (!read_num(&a) || !read_num(&b) || !read_num(&c) || !read_num(&e)) { i = d.size(); break; }
+                qx = bx + a; qy = by + b;
+                cx = bx + c; cy = by + e;
+                nvgQuadTo(context_, px(qx), py(qy), px(cx), py(cy));
+                break;
+            case 'T':
+                if (!read_num(&a) || !read_num(&b)) { i = d.size(); break; }
+                qx = 2 * cx - qx; qy = 2 * cy - qy;
+                cx = bx + a; cy = by + b;
+                nvgQuadTo(context_, px(qx), py(qy), px(cx), py(cy));
+                break;
+            case 'Z':
+                nvgClosePath(context_);
+                cx = sx; cy = sy;
+                break;
+            default:
+                i = d.size();
+                break;
+        }
+    }
+    nvgPathWinding(context_, NVG_SOLID);
+    nvgFillColor(context_, to_nvg(color));
+    nvgFill(context_);
 }
 
 }  // namespace pk

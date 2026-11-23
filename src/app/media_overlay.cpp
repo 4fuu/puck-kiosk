@@ -1,6 +1,7 @@
 #include "app/media_overlay.h"
 
 #include "core/log.h"
+#include "material-symbols/icons.h"
 #include "platform/http.h"
 
 #include <jpeglib.h>
@@ -603,11 +604,9 @@ Rect fit_rect(const Rect& bounds, int width, int height) {
 
 void draw_chevron(Canvas& canvas, float center_x, float center_y, float size, bool point_left,
                   Color color) {
-    const float direction = point_left ? -1.0f : 1.0f;
-    const float x_tip = center_x + direction * size * 0.30f;
-    const float x_back = center_x - direction * size * 0.22f;
-    canvas.stroke_line(x_back, center_y - size * 0.36f, x_tip, center_y, 5.0f, color);
-    canvas.stroke_line(x_tip, center_y, x_back, center_y + size * 0.36f, 5.0f, color);
+    const Rect box{center_x - size * 0.5f, center_y - size * 0.5f, size, size};
+    canvas.fill_path(point_left ? icons::kChevronLeft : icons::kChevronRight,
+                     Rect{0.0f, -960.0f, 960.0f, 960.0f}, box, color);
 }
 
 }  // namespace

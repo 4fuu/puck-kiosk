@@ -1,6 +1,7 @@
 #include "app/car_ui.h"
 
 #include "app/media_overlay.h"
+#include "material-symbols/icons.h"
 #include "puck/puck_view.h"
 
 #include <algorithm>
@@ -163,91 +164,28 @@ void draw_round_button(Canvas& canvas, float center_x, float center_y, float dia
     canvas.fill_circle(center_x, center_y, diameter * 0.5f, fade(fill, opacity));
 }
 
+constexpr Rect kIconBox{0.0f, -960.0f, 960.0f, 960.0f};
+
+Rect icon_rect(float center_x, float center_y, float size) {
+    return Rect{center_x - size * 0.5f, center_y - size * 0.5f, size, size};
+}
+
 void draw_call_icon(Canvas& canvas, float center_x, float center_y, float size, Color color) {
-    // A curved handset (phone.fill): an arc band with flared earpiece pads,
-    // rotated 45 degrees so the earpiece sits top-left.
-    const float rotation = 0.7853981634f;
-    const float cos_r = std::cos(rotation);
-    const float sin_r = std::sin(rotation);
-    const auto place = [&](float x, float y, float* out_x, float* out_y) {
-        *out_x = center_x + x * cos_r - y * sin_r;
-        *out_y = center_y + x * sin_r + y * cos_r;
-    };
-    const float arc_cy = -0.55f * size;
-    const float radius = 0.62f * size;
-    const float half = 0.085f * size;
-    const float start = 0.349066f;  // 20 degrees
-    const float end = 2.792527f;    // 160 degrees
-    constexpr int kSegments = 48;
-    for (int i = 0; i <= kSegments; ++i) {
-        const float angle = start + (end - start) * (static_cast<float>(i) / kSegments);
-        const float dx = std::cos(angle);
-        const float dy = std::sin(angle);
-        float x, y;
-        place(dx * radius, arc_cy + dy * radius, &x, &y);
-        canvas.fill_circle(x, y, half, color);
-        if (i == 0 || i == kSegments) {
-            canvas.fill_circle(x, y, 0.155f * size, color);
-        }
-    }
+    canvas.fill_path(icons::kCall, kIconBox, icon_rect(center_x, center_y, size), color);
 }
 
 void draw_end_icon(Canvas& canvas, float center_x, float center_y, float size, Color color) {
-    const float dot = 0.078f * size;
-    const float start = 3.490659f;  // 200 degrees
-    const float end = 5.934119f;    // 340 degrees
-    for (int i = 0; i <= 24; ++i) {
-        const float angle = start + (end - start) * (static_cast<float>(i) / 24.0f);
-        canvas.fill_circle(center_x + std::cos(angle) * 0.38f * size,
-                           center_y + 0.04f * size + std::sin(angle) * 0.22f * size, dot,
-                           color);
-    }
-    const float end_w = 0.26f * size;
-    const float end_h = 0.32f * size;
-    canvas.fill_rounded_rect(Rect{center_x - 0.38f * size - end_w * 0.5f,
-                                  center_y + 0.16f * size - end_h * 0.5f, end_w, end_h},
-                             0.08f * size, color);
-    canvas.fill_rounded_rect(Rect{center_x + 0.38f * size - end_w * 0.5f,
-                                  center_y + 0.16f * size - end_h * 0.5f, end_w, end_h},
-                             0.08f * size, color);
+    canvas.fill_path(icons::kCallEnd, kIconBox, icon_rect(center_x, center_y, size), color);
 }
 
 void draw_mute_icon(Canvas& canvas, float center_x, float center_y, float size, Color color,
-                    Color button_fill) {
-    const float body_w = 0.26f * size;
-    const float body_h = 0.54f * size;
-    const Rect body{center_x - body_w * 0.5f, center_y - 0.08f * size - body_h * 0.5f, body_w,
-                    body_h};
-    canvas.fill_rounded_rect(body, body_w * 0.5f, color);
-    const float inner_w = 0.12f * size;
-    const float inner_h = 0.40f * size;
-    canvas.fill_rounded_rect(Rect{center_x - inner_w * 0.5f,
-                                  center_y - 0.08f * size - inner_h * 0.5f, inner_w, inner_h},
-                             inner_w * 0.5f, button_fill);
-
-    const float stroke = 0.065f * size;
-    const float cradle_x = 0.25f * size;
-    const float cradle_top = center_y - 0.12f * size;
-    const float cradle_bottom = center_y + 0.13f * size;
-    canvas.stroke_line(center_x - cradle_x, cradle_top, center_x - cradle_x, cradle_bottom, stroke,
-                       color);
-    canvas.stroke_line(center_x + cradle_x, cradle_top, center_x + cradle_x, cradle_bottom, stroke,
-                       color);
-    canvas.stroke_line(center_x - cradle_x, cradle_bottom, center_x + cradle_x, cradle_bottom,
-                       stroke, color);
-    canvas.stroke_line(center_x, cradle_bottom, center_x, center_y + 0.30f * size, stroke, color);
-
-    canvas.stroke_line(center_x - 0.40f * size, center_y - 0.36f * size,
-                       center_x + 0.40f * size, center_y + 0.36f * size, 0.080f * size, color);
+                    bool muted) {
+    canvas.fill_path(muted ? icons::kMic : icons::kMicOff, kIconBox,
+                     icon_rect(center_x, center_y, size), color);
 }
 
-void draw_lock_icon(Canvas& canvas, float center_x, float center_y, float size, Color color,
-                    Color background) {
-    canvas.stroke_circle(center_x, center_y - 0.08f * size, 0.18f * size, 0.055f * size, color);
-    canvas.fill_rounded_rect(Rect{center_x - 0.24f * size, center_y - 0.02f * size,
-                                  0.48f * size, 0.34f * size},
-                             0.08f * size, color);
-    canvas.fill_circle(center_x, center_y + 0.12f * size, 0.045f * size, background);
+void draw_lock_icon(Canvas& canvas, float center_x, float center_y, float size, Color color) {
+    canvas.fill_path(icons::kLock, kIconBox, icon_rect(center_x, center_y, size), color);
 }
 
 void draw_qr_card(Canvas& canvas, Rect card, float radius, const QrCode& qr) {
@@ -651,8 +589,7 @@ void draw_confirm_button(Canvas& canvas, const CallLayout& layout, const Passkey
     if (with_icon) {
         const float group = icon_size + gap + label_width;
         const float start = rect.center_x() - group * 0.5f;
-        draw_lock_icon(canvas, start + icon_size * 0.5f, rect.center_y(), icon_size, kWhite,
-                       kSuccess);
+        draw_lock_icon(canvas, start + icon_size * 0.5f, rect.center_y(), icon_size, kWhite);
         canvas.text(start + icon_size + gap, rect.center_y(), label_style, label);
     } else {
         label_style = fit_font_size(canvas, label_style, label, available, 20.0f);
@@ -708,9 +645,9 @@ void draw_call_controls(Canvas& canvas, const CallLayout& layout, const CallView
     const float scale = 0.65f + 0.35f * presence;
     const Color fill = call.muted ? kForeground : kSecondary;
     const Color icon = call.muted ? kBackground : kForeground;
-    const Color cutout = mix(kBackground, fill, opacity);
     draw_round_button(canvas, mute_x, mute_y, layout.button_size * scale, fill, opacity);
-    draw_mute_icon(canvas, mute_x, mute_y, layout.icon_size * scale, fade(icon, opacity), cutout);
+    draw_mute_icon(canvas, mute_x, mute_y, layout.icon_size * scale, fade(icon, opacity),
+                   call.muted);
     if (!disabled) {
         hits.add(Rect{mute_x - radius, mute_y - radius, layout.button_size, layout.button_size},
                  UiAction::Mute);

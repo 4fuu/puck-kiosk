@@ -58,6 +58,7 @@ public:
     float measure_text(const pk::TextStyle& style, const std::string& value) override {
         return static_cast<float>(value.size()) * style.size * 0.5f;
     }
+    void fill_path(const std::string&, pk::Rect, pk::Rect, pk::Color) override {}
 };
 
 class FakePuck final : public pk::PuckView {

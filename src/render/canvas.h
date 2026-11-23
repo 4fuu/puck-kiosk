@@ -81,6 +81,10 @@ public:
     // Width of the laid-out text, including tracking and synthetic weight.
     virtual float measure_text(const TextStyle& style, const std::string& value) = 0;
 
+    // Fills an SVG path (M/L/H/V/C/S/Q/T/Z, absolute and relative) scaled from
+    // view_box into dest, preserving aspect and centering. Winding is ignored.
+    virtual void fill_path(const std::string& d, Rect view_box, Rect dest, Color color) = 0;
+
     float measure_text(float size, const std::string& value) {
         TextStyle style;
         style.size = size;

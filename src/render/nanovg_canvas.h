@@ -30,6 +30,7 @@ public:
 
     void text(float x, float y, const TextStyle& style, const std::string& value) override;
     float measure_text(const TextStyle& style, const std::string& value) override;
+    void fill_path(const std::string& d, Rect view_box, Rect dest, Color color) override;
 
 private:
     NVGcontext* context_ = nullptr;
