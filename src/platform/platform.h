@@ -17,6 +17,7 @@ struct PlatformOptions {
     int frames = 1;
     std::string output_path;
     std::string audio_backend = "auto";  // auto | file | null | alsa
+    std::string audio_input_path;
     std::string audio_capture_path;
     std::string audio_playback_path;
     double audio_tone_hz = 440.0;

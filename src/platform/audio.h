@@ -29,6 +29,7 @@ struct FileAudioOptions {
     int channels = 1;
     double tone_hz = 440.0;
     double amplitude = 0.2;
+    std::string input_path;
     std::string capture_path;
     std::string playback_path;
     bool realtime = true;

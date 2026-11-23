@@ -46,6 +46,7 @@ std::unique_ptr<Platform> create_platform(const PlatformOptions& options, std::s
     if (!platform->audio) {
         FileAudioOptions file;
         file.tone_hz = options.audio_tone_hz;
+        file.input_path = options.audio_input_path;
         file.capture_path = options.audio_capture_path;
         file.playback_path = options.audio_playback_path;
         std::string audio_error;

@@ -37,6 +37,7 @@ void print_help(const char* program) {
               << "  --audio <name>          auto | file | null | alsa\n"
               << "  --voice-out <path>      WAV sink for decoded call audio\n"
               << "  --voice-capture <path>  WAV of the synthetic capture signal\n"
+              << "  --voice-in <path>       Mono 48 kHz WAV used as capture input instead of the tone\n"
               << "  --alsa-capture <dev>    ALSA capture device (default: default)\n"
               << "  --alsa-playback <dev>   ALSA playback device (default: default)\n"
               << "  -h, --help              Show this help\n";
@@ -135,6 +136,10 @@ int main(int argc, char** argv) {
         }
         if (argument == "--voice-capture" && i + 1 < argc) {
             options.platform.audio_capture_path = argv[++i];
+            continue;
+        }
+        if (argument == "--voice-in" && i + 1 < argc) {
+            options.platform.audio_input_path = argv[++i];
             continue;
         }
         if (argument == "--alsa-capture" && i + 1 < argc) {

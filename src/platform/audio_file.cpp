@@ -16,6 +16,75 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
+bool read_wav_mono(const std::string& path, int expected_rate, std::vector<std::int16_t>* samples,
+                   std::string* error) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        *error = "cannot open " + path;
+        return false;
+    }
+    const auto read_u32 = [&in]() {
+        unsigned char b[4] = {};
+        in.read(reinterpret_cast<char*>(b), 4);
+        return static_cast<std::uint32_t>(b[0]) | (static_cast<std::uint32_t>(b[1]) << 8) |
+               (static_cast<std::uint32_t>(b[2]) << 16) | (static_cast<std::uint32_t>(b[3]) << 24);
+    };
+    const auto read_u16 = [&in]() {
+        unsigned char b[2] = {};
+        in.read(reinterpret_cast<char*>(b), 2);
+        return static_cast<std::uint16_t>(b[0] | (b[1] << 8));
+    };
+    char riff[4] = {};
+    in.read(riff, 4);
+    read_u32();
+    char wave[4] = {};
+    in.read(wave, 4);
+    if (std::string(riff, 4) != "RIFF" || std::string(wave, 4) != "WAVE") {
+        *error = path + " is not a RIFF/WAVE file";
+        return false;
+    }
+    bool have_format = false;
+    while (in) {
+        char id[4] = {};
+        in.read(id, 4);
+        const std::uint32_t size = read_u32();
+        const std::string chunk(id, 4);
+        if (chunk == "fmt ") {
+            const std::uint16_t format = read_u16();
+            const std::uint16_t channels = read_u16();
+            const std::uint32_t rate = read_u32();
+            read_u32();
+            read_u16();
+            const std::uint16_t bits = read_u16();
+            if (format != 1 || channels != 1 || bits != 16 ||
+                rate != static_cast<std::uint32_t>(expected_rate)) {
+                *error = path + " must be mono 16-bit PCM at " + std::to_string(expected_rate) + " Hz";
+                return false;
+            }
+            have_format = true;
+            if (size > 16) {
+                in.seekg(size - 16, std::ios::cur);
+            }
+        } else if (chunk == "data") {
+            if (!have_format) {
+                *error = path + " has data before fmt";
+                return false;
+            }
+            samples->resize(size / 2);
+            in.read(reinterpret_cast<char*>(samples->data()), size);
+            if (static_cast<std::uint32_t>(in.gcount()) != size) {
+                *error = path + " is truncated";
+                return false;
+            }
+            return !samples->empty();
+        } else {
+            in.seekg(size + (size & 1u), std::ios::cur);
+        }
+    }
+    *error = path + " has no data chunk";
+    return false;
+}
+
 void write_u16(std::ostream& out, std::uint16_t value) {
     const char bytes[2] = {static_cast<char>(value & 0xff), static_cast<char>((value >> 8) & 0xff)};
     out.write(bytes, 2);
@@ -134,6 +203,12 @@ public:
         capture_time_ = 0.0;
         capture_next_ = std::chrono::steady_clock::now();
         capture_running_ = false;
+        capture_input_.clear();
+        input_pos_ = 0;
+        if (!options_.input_path.empty() &&
+            !read_wav_mono(options_.input_path, sample_rate, &capture_input_, error)) {
+            return false;
+        }
         if (!capture_wav_.open(options_.capture_path, sample_rate, channels, error)) {
             return false;
         }
@@ -159,19 +234,25 @@ public:
             }
             std::vector<std::int16_t> interleaved(frames * static_cast<std::size_t>(capture_channels_));
             for (std::size_t frame = 0; frame < frames; ++frame) {
-                const double envelope = 0.55 + 0.45 * std::sin(2.0 * kPi * 2.2 * capture_time_);
-                double value = std::sin(capture_phase_) + 0.35 * std::sin(2.0 * capture_phase_) +
-                               0.18 * std::sin(3.0 * capture_phase_);
-                value *= options_.amplitude * envelope / 1.53;
-                const auto sample = static_cast<std::int16_t>(
-                    std::clamp(value * 32767.0, -32768.0, 32767.0));
+                std::int16_t sample = 0;
+                if (!capture_input_.empty()) {
+                    sample = capture_input_[input_pos_ % capture_input_.size()];
+                    ++input_pos_;
+                } else {
+                    const double envelope = 0.55 + 0.45 * std::sin(2.0 * kPi * 2.2 * capture_time_);
+                    double value = std::sin(capture_phase_) + 0.35 * std::sin(2.0 * capture_phase_) +
+                                   0.18 * std::sin(3.0 * capture_phase_);
+                    value *= options_.amplitude * envelope / 1.53;
+                    sample = static_cast<std::int16_t>(
+                        std::clamp(value * 32767.0, -32768.0, 32767.0));
+                    capture_phase_ += 2.0 * kPi * options_.tone_hz / capture_rate_;
+                    if (capture_phase_ > 2.0 * kPi) {
+                        capture_phase_ -= 2.0 * kPi;
+                    }
+                }
                 for (int channel = 0; channel < capture_channels_; ++channel) {
                     interleaved[frame * static_cast<std::size_t>(capture_channels_) +
                                 static_cast<std::size_t>(channel)] = sample;
-                }
-                capture_phase_ += 2.0 * kPi * options_.tone_hz / capture_rate_;
-                if (capture_phase_ > 2.0 * kPi) {
-                    capture_phase_ -= 2.0 * kPi;
                 }
                 capture_time_ += 1.0 / capture_rate_;
             }
@@ -238,6 +319,8 @@ private:
     int capture_channels_ = 1;
     double capture_phase_ = 0.0;
     double capture_time_ = 0.0;
+    std::vector<std::int16_t> capture_input_;
+    std::size_t input_pos_ = 0;
     std::chrono::steady_clock::time_point capture_next_;
 };
 
