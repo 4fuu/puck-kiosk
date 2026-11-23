@@ -44,3 +44,12 @@ target("puck-kiosk")
         add_cxflags("-fno-omit-frame-pointer")
     end
 
+target("puck-tests")
+    set_kind("binary")
+    set_default(false)
+    set_rundir("$(projectdir)")
+    add_files("tests/**.cpp")
+    add_files("src/puck/puck_v2.cpp", "src/puck/puck_rig.cpp")
+    add_includedirs("src", "third_party")
+    add_links("m")
+    set_warnings("all", "extra")
