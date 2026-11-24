@@ -8,6 +8,16 @@
 // uses. Including this header maps the gl* calls that opengl32.dll does not
 // export onto that table; the OpenGL 1.1 calls stay direct, exactly like
 // nanovg_gl3_impl.h does for the vendored NanoVG backend.
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include <GL/gl.h>
 #include <GL/glext.h>
 
