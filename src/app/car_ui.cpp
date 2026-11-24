@@ -748,10 +748,23 @@ void CarUi::notify_input(const InputEvent& event) {
         hints_visible_ = true;
         return;
     }
+    if (event.type == InputEvent::Type::KeyDown && (event.key == 123 || event.key == 88)) {
+        debug_revealed_ = !debug_revealed_;
+        return;
+    }
     if (event.type == InputEvent::Type::PointerDown ||
         event.type == InputEvent::Type::PointerMove ||
         event.type == InputEvent::Type::PointerUp) {
         hints_visible_ = false;
+        const float corner = 96.0f;
+        const bool in_corner = event.x < corner &&
+                               event.y > static_cast<float>(last_size_.height) - corner;
+        if (event.type == InputEvent::Type::PointerDown && in_corner) {
+            corner_holding_ = true;
+            corner_hold_start_ = std::chrono::steady_clock::now();
+        } else if (!in_corner || event.type == InputEvent::Type::PointerUp) {
+            corner_holding_ = false;
+        }
     }
 }
 
@@ -854,9 +867,37 @@ void CarUi::draw_focus_overlay(Canvas& canvas, Size size) {
 
     const float bar_height = badge + 8.0f;
     const float bar_width = total_width() + 20.0f;
-    const Rect bar{(static_cast<float>(size.width) - bar_width) * 0.5f,
-                   static_cast<float>(size.height) - bar_height - 8.0f, bar_width,
-                   bar_height};
+    // Corner placement: bottom-right first, bottom-left if it would cover a
+    // control; if both collide, sit above the controls instead of over them.
+    const float margin = 12.0f;
+    const auto collides = [&](const Rect& bar) {
+        for (const UiTarget& target : hits_.targets()) {
+            const Rect& r = target.rect;
+            if (bar.x < r.x + r.w && r.x < bar.x + bar.w && bar.y < r.y + r.h &&
+                r.y < bar.y + bar.h) {
+                return true;
+            }
+        }
+        return false;
+    };
+    Rect bar{static_cast<float>(size.width) - bar_width - margin,
+             static_cast<float>(size.height) - bar_height - margin, bar_width, bar_height};
+    if (collides(bar)) {
+        const Rect left{margin, static_cast<float>(size.height) - bar_height - margin, bar_width,
+                        bar_height};
+        if (!collides(left)) {
+            bar = left;
+        } else {
+            float top = static_cast<float>(size.height);
+            for (const UiTarget& target : hits_.targets()) {
+                const Rect& r = target.rect;
+                if (bar.x < r.x + r.w && r.x < bar.x + bar.w && r.y + r.h > bar.y) {
+                    top = std::min(top, r.y);
+                }
+            }
+            bar.y = top - bar_height - margin;
+        }
+    }
     canvas.fill_rounded_rect(bar, bar_height * 0.5f, hex(0x1a211a, 0.92f));
 
     float x = bar.x + 10.0f;
@@ -906,6 +947,16 @@ float CarUi::control_split(float time_seconds, bool in_call) {
 }
 
 void CarUi::draw(Canvas& canvas, Size size, float time_seconds) {
+    last_size_ = size;
+    if (corner_holding_ &&
+        std::chrono::steady_clock::now() - corner_hold_start_ >= std::chrono::seconds(2)) {
+        debug_revealed_ = true;
+        corner_holding_ = false;
+    }
+    if (debug_was_open_ && !debug_.open) {
+        debug_revealed_ = false;
+    }
+    debug_was_open_ = debug_.open;
     hits_.clear();
     if (debug_.open) {
         draw_debug(canvas, size);
@@ -1341,6 +1392,9 @@ void CarUi::draw_debug(Canvas& canvas, Size size) {
 }
 
 void CarUi::add_debug_target(Canvas& canvas, Size size, bool pairing) {
+    if (!debug_revealed_ && !debug_.open) {
+        return;
+    }
     const bool compact = compact_layout(size);
     const float debug_height = compact ? 44.0f : 64.0f;
     const float debug_font = compact ? 16.0f : 20.0f;

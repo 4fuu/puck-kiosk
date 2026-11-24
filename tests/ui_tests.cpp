@@ -528,6 +528,14 @@ void test_car_ui_targets() {
     ui.set_call(view);
     ui.draw(canvas, pk::Size{1280, 720}, 0.0f);
 
+    // The Debug entry is hidden in normal use; F12 reveals it.
+    CHECK(find_target(ui.hit_map(), pk::UiAction::DebugOpen) == nullptr);
+    pk::InputEvent reveal;
+    reveal.type = pk::InputEvent::Type::KeyDown;
+    reveal.key = 123;
+    ui.notify_input(reveal);
+    ui.draw(canvas, pk::Size{1280, 720}, 0.0f);
+
     const pk::UiTarget* mute = find_target(ui.hit_map(), pk::UiAction::Mute);
     const pk::UiTarget* end = find_target(ui.hit_map(), pk::UiAction::End);
     const pk::UiTarget* debug = find_target(ui.hit_map(), pk::UiAction::DebugOpen);

@@ -320,6 +320,8 @@ bool parse_input_script(const std::string& text, std::vector<ScriptedInput>* eve
                 const std::string key = entry["key"].get<std::string>();
                 if (key == "Escape" || key == "escape" || key == "esc") {
                     scripted.event.key = 27;
+                } else if (key == "F12" || key == "f12") {
+                    scripted.event.key = 123;
                 } else {
                     return fail("unknown input script key: " + key);
                 }
