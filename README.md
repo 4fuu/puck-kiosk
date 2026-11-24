@@ -293,9 +293,9 @@ license: NanoVG (MIT), Material Symbols (Apache-2.0), the Khronos GL headers
 - The installer is unsigned, so Windows SmartScreen warns on first run.
 - The mingw build links libqrencode (LGPL-2.1) statically. A permissively
   licensed encoder is required before redistribution.
-- The NSIS installer ships the executable, license, and icon only. It does not
-  install `assets/manifest.json` or the asset cache, so an installed copy uses
-  the placeholder Puck until those files are supplied in its working directory.
+- The NSIS installer ships the executable, license, icon, and
+  `assets/manifest.json` (URL/hash metadata only). The art itself is fetched
+  on first run into `assets/cache` under the install directory.
 - There is no IME or text-entry field, no platform authenticator (the passkey
   button re-authorizes the actor connection), and no kiosk lock: Escape closes
   the window.

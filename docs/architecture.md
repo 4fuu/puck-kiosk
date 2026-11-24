@@ -504,9 +504,9 @@ Packaging lives outside the app:
   session or starts pairing. The uninstaller removes the shortcuts, the
   executable, the icon, and the registry entries, and keeps the user's session
   and cache data.
-- The installer ships the executable, `LICENSE.txt`, and the icon. It does not
-  ship `assets/manifest.json` or the asset cache, so an installed copy uses the
-  placeholder Puck until those files are supplied in its working directory.
+- The installer ships the executable, `LICENSE.txt`, the icon, and
+  `assets/manifest.json`; the art is fetched on first run into `assets/cache`
+  under the install directory.
 
 The installer is unsigned.
 

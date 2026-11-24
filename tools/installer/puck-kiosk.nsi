@@ -105,6 +105,11 @@ Section "${APP_NAME}" SecApp
 !if "${PACKAGE_ICONFILE}" != ""
     File "/oname=puck-kiosk.ico" "${PACKAGE_ICONFILE}"
 !endif
+    ; The manifest is URL/hash metadata only; the art itself is fetched on
+    ; first run into assets/cache under the install directory.
+    SetOutPath "$INSTDIR\assets"
+    File "/oname=manifest.json" "${PACKAGE_MANIFESTFILE}"
+    SetOutPath "$INSTDIR"
 
     WriteUninstaller "$INSTDIR\uninstall.exe"
 
@@ -157,6 +162,8 @@ Section "Uninstall"
     Delete "$INSTDIR\${APP_EXE}"
     Delete "$INSTDIR\puck-kiosk.ico"
     Delete "$INSTDIR\LICENSE.txt"
+    Delete "$INSTDIR\assets\manifest.json"
+    RMDir "$INSTDIR\assets"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"
 

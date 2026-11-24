@@ -79,6 +79,7 @@ function main(package)
     specvars.PACKAGE_OUTPUTFILE = path.absolute(package:outputfile())
     specvars.PACKAGE_ICONFILE = iconfile
     specvars.PACKAGE_LICENSEFILE = path.absolute(package:get("licensefile"))
+    specvars.PACKAGE_MANIFESTFILE = path.absolute(path.join(os.projectdir(), "assets", "manifest.json"))
 
     os.mkdir(package:builddir())
     os.mkdir(package:outputdir())
