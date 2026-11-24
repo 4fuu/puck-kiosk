@@ -27,7 +27,11 @@ public:
     static constexpr float kCaptionButtonsWidth =
         kCaptionButtonWidth * 3.0f + kCaptionRightMargin;
 
-    explicit CarUi(PuckView& puck) : puck_(puck) {}
+    explicit CarUi(PuckView& puck) : puck_(&puck) {}
+
+    // The session path starts with the placeholder Puck and swaps in the real
+    // renderer once the asset cache is verified.
+    void set_puck(PuckView& puck) { puck_ = &puck; }
 
     void set_client_caption(bool enabled) { client_caption_ = enabled; }
     void set_visual(const PuckVisual& visual) { visual_ = visual; }
@@ -53,6 +57,9 @@ public:
     // the Puck is not on screen (a sheet or the debug panel is covering it).
     Rect puck_bounds() const { return puck_bounds_; }
     Rect puck_stage() const { return puck_stage_; }
+    // The pairing status line's draw rect from the last frame. Empty when the
+    // screen has no status text.
+    Rect status_bounds() const { return status_bounds_; }
 
 private:
     void draw_pairing(Canvas& canvas, Size size, float time_seconds);
@@ -66,7 +73,7 @@ private:
     void add_target(Rect rect, UiAction action, int index = -1);
     float control_split(float time_seconds, bool in_call);
 
-    PuckView& puck_;
+    PuckView* puck_;
     MediaOverlay* media_ = nullptr;
     PuckVisual visual_;
     QrCode qr_;
@@ -81,6 +88,7 @@ private:
     UiHitMap hits_;
     Rect puck_bounds_;
     Rect puck_stage_;
+    Rect status_bounds_;
     UiFocusView focus_;
     bool hints_visible_ = false;
     // Windowed Win32 has no OS title bar; the app draws this strip and the

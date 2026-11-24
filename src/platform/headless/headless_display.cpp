@@ -141,7 +141,7 @@ void HeadlessDisplay::make_current() {
 
 void HeadlessDisplay::swap() {
     glFinish();
-    if (frame_ + 1 >= frames_) {
+    if (frame_ + 1 >= frames_ && !output_path_.empty()) {
         std::string error;
         if (!write_ppm(output_path_, &error)) {
             log::error("%s", error.c_str());

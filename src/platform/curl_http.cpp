@@ -94,7 +94,6 @@ HttpResponse CurlHttpClient::request(const HttpRequest& request, std::string* er
     curl_easy_setopt(handle_, CURLOPT_MAXREDIRS, 8L);
     curl_easy_setopt(handle_, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(handle_, CURLOPT_TIMEOUT, 30L);
-    curl_easy_setopt(handle_, CURLOPT_ACCEPT_ENCODING, "");
     curl_easy_setopt(handle_, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(handle_, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(handle_, CURLOPT_SSL_VERIFYHOST, 2L);
@@ -102,6 +101,7 @@ HttpResponse CurlHttpClient::request(const HttpRequest& request, std::string* er
     curl_slist* header_list = nullptr;
     bool has_user_agent = false;
     bool has_expect = false;
+    bool has_accept_encoding = false;
     for (const auto& header : request.headers) {
         if (header.name.empty()) {
             continue;
@@ -112,7 +112,15 @@ HttpResponse CurlHttpClient::request(const HttpRequest& request, std::string* er
         if (header.name == "Expect") {
             has_expect = true;
         }
+        if (header.name == "Accept-Encoding") {
+            has_accept_encoding = true;
+        }
         header_list = curl_slist_append(header_list, (header.name + ": " + header.value).c_str());
+    }
+    // Asset downloads ask for an identity encoding because the Windows curl
+    // build does not decode every encoding the CDN can negotiate.
+    if (!has_accept_encoding) {
+        curl_easy_setopt(handle_, CURLOPT_ACCEPT_ENCODING, "");
     }
     if (!has_user_agent) {
         header_list = curl_slist_append(header_list, "User-Agent: puck-kiosk/0.1");

@@ -156,9 +156,20 @@ target("media-tests")
     set_kind("binary")
     set_default(false)
     set_rundir("$(projectdir)")
-    add_files("tests/media_tests.cpp", "src/app/media_overlay.cpp", "src/core/log.cpp")
+    add_files("tests/media_tests.cpp", "src/app/media_overlay.cpp", "src/app/assets.cpp",
+              "src/core/sha256.cpp", "src/core/log.cpp")
     add_includedirs("src", "third_party")
-    add_links("m", "pthread", "png", "webp", "jpeg")
+    add_links("m", "pthread", "png", "webp", "jpeg", "z")
+    set_warnings("all", "extra")
+
+target("startup-tests")
+    set_kind("binary")
+    set_default(false)
+    set_rundir("$(projectdir)")
+    add_files("tests/startup_tests.cpp", "src/app/session_startup.cpp", "src/app/pairing.cpp",
+              "src/core/log.cpp")
+    add_includedirs("src", "third_party")
+    add_links("m", "pthread", "ssl", "crypto", "qrencode")
     set_warnings("all", "extra")
 
 target("ui-tests")

@@ -29,4 +29,8 @@ std::unique_ptr<PuckView> create_puck_view(bool enable_3d) {
     return puck;
 }
 
+std::unique_ptr<PuckView> create_placeholder_puck_view() {
+    return std::make_unique<Puck2D>();
+}
+
 }  // namespace pk

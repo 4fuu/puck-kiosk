@@ -260,19 +260,22 @@ struct PairingLayout {
     Rect title;
     Rect slot;
     Rect card;
+    Rect status;
     Rect signin;
     Rect debug;
     TextStyle title_style;
+    TextStyle status_style;
     TextStyle signin_style;
     TextStyle code_style;
     float title_line = 60.0f;
     float side_gap = 24.0f;
     float card_radius = 20.0f;
+    bool show_status = false;
     bool show_signin = true;
 };
 
 PairingLayout pairing_layout(Canvas& canvas, Size size, const std::string& title,
-                             const std::string& code) {
+                             const std::string& code, const std::string& status) {
     PairingLayout layout;
     const float width = static_cast<float>(size.width);
     const float height = static_cast<float>(size.height);
@@ -302,6 +305,9 @@ PairingLayout pairing_layout(Canvas& canvas, Size size, const std::string& title
     const float signin_pad = layout.compact ? 20.0f : 28.0f;
     const float signin_height = layout.compact ? 44.0f : 56.0f;
     layout.signin_style = type(signin_size, kMuted, TextAlign::Center);
+    const float status_size = layout.compact ? 16.0f : 20.0f;
+    const float status_height = layout.compact ? 22.0f : 28.0f;
+    layout.status_style = type(status_size, kMuted, TextAlign::Center);
     const float code_size = layout.compact ? 56.0f : 72.0f;
     layout.code_style =
         type(code_size, kForeground, TextAlign::Center, FontWeight::Medium, 0.2f);
@@ -325,6 +331,7 @@ PairingLayout pairing_layout(Canvas& canvas, Size size, const std::string& title
     pad_bottom += kSafeBottom;
     pad_left += kSafeLeft;
     const float gap = layout.portrait ? 24.0f : (short_landscape ? 24.0f : 48.0f);
+    layout.show_status = code.empty() && !status.empty();
     layout.show_signin = code.empty() && title != "Connecting";
 
     float side_width = card;
@@ -342,6 +349,7 @@ PairingLayout pairing_layout(Canvas& canvas, Size size, const std::string& title
     const float title_height =
         static_cast<float>(std::max<std::size_t>(1, title_lines.size())) * layout.title_line;
     const float side_height = title_height + layout.side_gap + card +
+                              (layout.show_status ? layout.side_gap + status_height : 0.0f) +
                               (layout.show_signin ? layout.side_gap + signin_height : 0.0f);
 
     if (layout.portrait) {
@@ -363,12 +371,17 @@ PairingLayout pairing_layout(Canvas& canvas, Size size, const std::string& title
     layout.slot = Rect{layout.side.x, layout.title.y + layout.title.h + layout.side_gap,
                        layout.side.w, card};
     layout.card = Rect{layout.slot.x, layout.slot.y, card, card};
+    if (layout.show_status) {
+        layout.status = Rect{layout.side.x, layout.slot.y + layout.slot.h + layout.side_gap,
+                             layout.side.w, status_height};
+    }
     if (layout.show_signin) {
         const float signin_width =
             canvas.measure_text(layout.signin_style, "Or Sign In Manually") + signin_pad * 2.0f;
-        layout.signin = Rect{layout.side.center_x() - signin_width * 0.5f,
-                             layout.slot.y + layout.slot.h + layout.side_gap, signin_width,
-                             signin_height};
+        const float signin_top = layout.slot.y + layout.slot.h + layout.side_gap +
+                                 (layout.show_status ? status_height + layout.side_gap : 0.0f);
+        layout.signin = Rect{layout.side.center_x() - signin_width * 0.5f, signin_top,
+                             signin_width, signin_height};
     }
 
     const float debug_height = layout.compact ? 44.0f : 64.0f;
@@ -960,6 +973,7 @@ void CarUi::draw(Canvas& canvas, Size size, float time_seconds) {
     hits_.clear();
     puck_bounds_ = {};
     puck_stage_ = {};
+    status_bounds_ = {};
     if (caption_height > 0) {
         canvas.save();
         canvas.translate(0.0f, static_cast<float>(caption_height));
@@ -1014,7 +1028,7 @@ void CarUi::draw_client_caption(Canvas& canvas, Size size) {
 }
 
 void CarUi::draw_pairing(Canvas& canvas, Size size, float time_seconds) {
-    const PairingLayout layout = pairing_layout(canvas, size, title_, code_);
+    const PairingLayout layout = pairing_layout(canvas, size, title_, code_, status_);
 
     const float puck_size = std::min(layout.stage.w, layout.stage.h);
     const float puck_y = layout.portrait ? layout.stage.y + layout.stage.h - puck_size
@@ -1022,8 +1036,8 @@ void CarUi::draw_pairing(Canvas& canvas, Size size, float time_seconds) {
     const Rect puck{layout.stage.center_x() - puck_size * 0.5f, puck_y, puck_size, puck_size};
     puck_bounds_ = puck;
     puck_stage_ = layout.stage;
-    puck_.set_stage(puck_stage_);
-    puck_.draw(canvas, puck, visual_, time_seconds);
+    puck_->set_stage(puck_stage_);
+    puck_->draw(canvas, puck, visual_, time_seconds);
 
     if (!title_.empty()) {
         draw_wrapped_center(canvas, layout.title.center_x(), layout.title.y, layout.title_style,
@@ -1036,6 +1050,13 @@ void CarUi::draw_pairing(Canvas& canvas, Size size, float time_seconds) {
         TextStyle code_style =
             fit_font_size(canvas, layout.code_style, code_, layout.slot.w - 16.0f, 28.0f);
         canvas.text(layout.slot.center_x(), layout.slot.center_y(), code_style, code_);
+    }
+
+    if (layout.show_status) {
+        status_bounds_ = layout.status;
+        const TextStyle status_style = layout.status_style;
+        canvas.text(layout.status.center_x(), layout.status.center_y(), status_style,
+                    fit_text(canvas, status_style, status_, layout.status.w));
     }
 
     if (layout.show_signin) {
@@ -1056,7 +1077,7 @@ void CarUi::draw_call(Canvas& canvas, Size size, float time_seconds) {
     if (passkey_.mode != PasskeyMode::Hidden && !in_call) {
         draw_passkey(canvas, layout.main_content, layout.compact);
     } else {
-        if (!puck_.is_3d()) {
+        if (!puck_->is_3d()) {
             draw_call_backdrop(canvas, layout.main, layout.puck, time_seconds,
                                call_.speaking || call_.output_level > 0.02f);
         }
@@ -1068,8 +1089,8 @@ void CarUi::draw_call(Canvas& canvas, Size size, float time_seconds) {
         visual.mouth = call_.mouth;
         puck_bounds_ = layout.puck;
         puck_stage_ = layout.main;
-        puck_.set_stage(puck_stage_);
-        puck_.draw(canvas, layout.puck, visual, time_seconds);
+        puck_->set_stage(puck_stage_);
+        puck_->draw(canvas, layout.puck, visual, time_seconds);
         draw_call_caption(canvas, layout, call_);
     }
 

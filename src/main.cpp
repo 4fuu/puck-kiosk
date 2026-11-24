@@ -25,13 +25,16 @@ void print_help(const char* program) {
               << "  --height <px>           Surface height (default 720)\n"
               << "  --render-scale <f>      Supersample factor 1..3 for the visible win32 window\n"
               << "                          (default 2; 1 disables supersampling)\n"
-              << "  --frames <n>            Render n frames (default 1; 0 = until the win32 window closes)\n"
-              << "  --out <path>            PPM output for the last rendered frame\n"
+              << "  --frames <n>            Render n frames (headless default 1; win32 window default 0,\n"
+              << "                          which runs until the window closes; --out implies 1)\n"
+              << "  --out <path>            PPM output for the last rendered frame (headless only;\n"
+              << "                          the win32 window writes no PPM unless --out is given)\n"
               << "  --font <path>           TTF/OTF font used by the 2D canvas\n"
               << "  --no-3d                 Force the 2D Puck renderer\n"
-              << "  --pair                  Pair with a phone, render the QR, then connect the actor\n"
+              << "  --pair                  Force a fresh pairing (the default launch restores the saved session)\n"
               << "  --pair-timeout <s>      Seconds to wait for phone approval (default 600)\n"
-              << "  --actor-seconds <s>     Observation window after pairing; 0 runs until quit (default 60)\n"
+              << "  --actor-seconds <s>     Observation window after pairing; 0 runs until quit\n"
+              << "                          (default 0 for the win32 window, 60 otherwise)\n"
               << "  --call                  Start a voice call after pairing (requires --pair)\n"
               << "  --mute-after <s>        Mute the call N seconds after it starts\n"
               << "  --end-after <s>         End the call N seconds after it starts\n"
@@ -108,8 +111,9 @@ int main(int argc, char** argv) {
 #endif
     options.platform.width = 1280;
     options.platform.height = 720;
-    options.platform.frames = 1;
-    options.platform.output_path = "build/pairing.ppm";
+    bool frames_set = false;
+    bool output_set = false;
+    bool actor_seconds_set = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
@@ -294,10 +298,12 @@ int main(int argc, char** argv) {
                 pk::log::error("invalid --frames");
                 return 2;
             }
+            frames_set = true;
             continue;
         }
         if (argument == "--out" && i + 1 < argc) {
             options.platform.output_path = argv[++i];
+            output_set = true;
             continue;
         }
         if (argument == "--pair-timeout" && i + 1 < argc) {
@@ -312,6 +318,7 @@ int main(int argc, char** argv) {
                 pk::log::error("invalid --actor-seconds");
                 return 2;
             }
+            actor_seconds_set = true;
             continue;
         }
         if (argument == "--font" && i + 1 < argc) {
@@ -321,6 +328,22 @@ int main(int argc, char** argv) {
         pk::log::error("unknown option: %s", argument.c_str());
         print_help(argv[0]);
         return 2;
+    }
+
+    // A normal desktop launch behaves like an app: it runs until the window
+    // closes and writes no PPM. Headless and DRM keep the one-frame snapshot
+    // default; the hidden win32 window keeps it too.
+    const bool visible_win32 = options.platform.backend == "win32";
+    if (!frames_set) {
+        // An explicit --out is a diagnostic snapshot; without it the window
+        // runs until the user closes it.
+        options.platform.frames = visible_win32 && !output_set ? 0 : 1;
+    }
+    if (!output_set) {
+        options.platform.output_path = visible_win32 ? "" : "build/pairing.ppm";
+    }
+    if (!actor_seconds_set && visible_win32) {
+        options.actor_seconds = 0;
     }
 
     if (!options.platform.output_path.empty()) {

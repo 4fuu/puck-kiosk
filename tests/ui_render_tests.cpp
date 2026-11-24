@@ -332,6 +332,57 @@ int main() {
         }
     }
 
+    // Pairing loading state: the status line sits under the QR card and must
+    // be visible while startup and the asset fetch are still running.
+    ui.set_client_caption(false);
+    ui.set_sheet({});
+    ui.set_pairing(pk::QrCode{}, "Call Puck", "Restoring session");
+    renderer.begin(display.size(), display.dpi_scale());
+    ui.draw(renderer.canvas(), display.size(), 3.0f);
+    renderer.end();
+    display.swap();
+    if (!read_ppm(output, &image)) {
+        return fail("cannot read the loading frame");
+    }
+    const pk::Rect status = ui.status_bounds();
+    if (status.w <= 0.0f || status.h <= 0.0f) {
+        std::fprintf(stderr, "the pairing loading state has no status rect\n");
+        ++failures;
+    } else {
+        const InkBounds status_ink = ink_bounds(image, status);
+        if (!status_ink.found || status_ink.pixels < 20) {
+            std::fprintf(stderr, "the pairing loading status drew no ink\n");
+            ++failures;
+        } else {
+            std::printf("PASS: pairing loading status renders (%d px)\n", status_ink.pixels);
+        }
+    }
+
+    // Empty output path: the headless display must not try to write a PPM.
+    const auto previous_directory = std::filesystem::current_path();
+    const auto scratch = previous_directory / "build" / "empty-output";
+    std::error_code scratch_error;
+    std::filesystem::remove_all(scratch, scratch_error);
+    std::filesystem::create_directories(scratch, scratch_error);
+    std::filesystem::current_path(scratch);
+    {
+        pk::HeadlessDisplay quiet(64, 64, "", 1);
+        if (!quiet.initialize(&error)) {
+            std::filesystem::current_path(previous_directory);
+            return fail("empty-output headless display: " + error);
+        }
+        quiet.swap();
+    }
+    std::filesystem::current_path(previous_directory);
+    const bool empty_output = std::filesystem::is_empty(scratch, scratch_error);
+    std::filesystem::remove_all(scratch, scratch_error);
+    if (!empty_output) {
+        std::fprintf(stderr, "an empty output path wrote a file\n");
+        ++failures;
+    } else {
+        std::printf("PASS: an empty output path writes no PPM\n");
+    }
+
     if (failures == 0) {
         std::printf("PASS: button label is vertically and horizontally centered\n");
     }

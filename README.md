@@ -96,18 +96,25 @@ contains the two local package overrides the mingw build needs; see its README.
 ### Run
 
 ```bash
-wine build/mingw/x64/release/puck-kiosk.exe --platform win32 \
-  --frames 1 --out build/win32-pairing.ppm
+wine build/mingw/x64/release/puck-kiosk.exe
 ```
 
-`--platform win32` opens a window and runs until `--frames` is reached, the
-window is closed, or Escape is pressed. `--frames 0` runs until the window is
-closed. `--platform headless` creates a hidden WGL window and writes the PPM,
-which is the Windows equivalent of the Linux headless smoke test. The pairing
-flow needs network access:
+With no flags the executable behaves like a desktop app: it opens the window
+immediately, restores the saved car session from the secure store, and connects
+the actor. When no session is saved, or the saved one is no longer valid, it
+shows the pairing QR. Startup work (session validation, remote-hash discovery,
+the pairing challenge, and the asset fetch) runs off the UI thread, so the
+window paints a live loading state instead of blocking on the network. `--pair`
+forces a fresh pairing even when a saved session exists.
+
+The window runs until it is closed and writes no PPM. `--platform headless`
+creates a hidden WGL window and writes the PPM, which is the Windows equivalent
+of the Linux headless smoke test. Use `--frames 1 --out <path>` for a single
+diagnostic snapshot:
 
 ```bash
-wine build/mingw/x64/release/puck-kiosk.exe --pair --frames 0
+wine build/mingw/x64/release/puck-kiosk.exe --platform win32 \
+  --frames 1 --out build/win32-pairing.ppm
 ```
 
 `--fullscreen` creates a borderless popup whose client area is exactly

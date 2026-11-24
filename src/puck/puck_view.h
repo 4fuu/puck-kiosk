@@ -26,4 +26,9 @@ public:
 
 std::unique_ptr<PuckView> create_puck_view(bool enable_3d);
 
+// A Puck2D that draws its built-in placeholder without reading or uploading
+// the asset cache. The desktop launch shows it for the first frames while the
+// cache is verified, then swaps in create_puck_view().
+std::unique_ptr<PuckView> create_placeholder_puck_view();
+
 }  // namespace pk

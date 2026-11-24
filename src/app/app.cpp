@@ -1,5 +1,6 @@
 #include "app/app.h"
 
+#include "app/assets.h"
 #include "app/call_flow.h"
 #include "app/car_ui.h"
 #include "app/diagnostics.h"
@@ -7,6 +8,7 @@
 #include "app/pairing.h"
 #include "app/passkey.h"
 #include "app/plugin_ui.h"
+#include "app/session_startup.h"
 #include "app/ui_focus.h"
 #include "app/ui_input.h"
 #include "core/log.h"
@@ -22,6 +24,7 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -736,9 +739,10 @@ int run_demo_media(const AppOptions& options, Platform& platform, Renderer& rend
                            true);
 }
 
-int run_pairing(const AppOptions& options, Platform& platform, Renderer& renderer, CarUi& ui,
+int run_session(const AppOptions& options, Platform& platform, Renderer& renderer, CarUi& ui,
                 MediaOverlay& media, PluginUi& plugins, PasskeyFlow& passkey,
-                Diagnostics& diagnostics) {
+                Diagnostics& diagnostics, const PairingOptions& pairing_options,
+                std::unique_ptr<PuckView>& puck) {
     if (!platform.http) {
         log::error("pairing requires an HTTP client");
         return 1;
@@ -754,37 +758,33 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
     diagnostics.set_audio(platform.audio ? platform.audio->name() : "none", platform.audio != nullptr);
     diagnostics.set_session(false, {});
 
-    PairingSession pairing(*platform.http, platform.secure_store.get());
-    CarSession saved;
-    std::string error;
-    if (pairing.restore(&saved, &error)) {
-        if (!saved.thread_id.empty()) {
-            log::info("restored saved session for thread %s", saved.thread_id.c_str());
-        } else {
-            log::info("restored saved cookies");
-        }
-    } else {
-        log::info("%s", error.c_str());
-    }
-
-    CarSession session;
-    bool resumed = false;
-    if (!saved.thread_id.empty()) {
-        if (pairing.load_car_session(&session, &error) && !session.thread_id.empty()) {
-            log::info("saved session still valid; skipping pairing");
-            resumed = true;
-        } else {
-            log::info("saved session not reusable (%s); pairing again",
-                      redact_text(error).c_str());
-        }
-    }
-
-    if (!resumed && !pairing.start(&error)) {
-        log::error("cannot start pairing: %s", error.c_str());
-        return 1;
-    }
-
     const auto started = Clock::now();
+    const std::string backend_name = platform.display->backend_name();
+    // A single-frame diagnostic run waits for the ready state so its PPM is the
+    // QR or connecting screen. The default desktop window (frames=0) renders
+    // the loading state immediately instead.
+    const bool snapshot_mode = backend_name == "headless" || backend_name == "win32-headless" ||
+                               (backend_name == "win32" && options.platform.frames > 0);
+    AssetFetcher assets(*platform.http);
+    bool puck_upgraded = false;
+    auto upgrade_puck = [&]() -> bool {
+        if (puck_upgraded || !assets.finished()) {
+            return false;
+        }
+        platform.display->make_current();
+        auto next = create_puck_view(options.enable_3d);
+        ui.set_puck(*next);
+        puck = std::move(next);
+        puck_upgraded = true;
+        log::info("Puck renderer: %s", puck->name());
+        return true;
+    };
+
+    SessionStartup startup(*platform.http, platform.secure_store.get(), pairing_options,
+                           options.pair);
+    startup.start();
+    assets.start();
+
     auto elapsed_seconds = [&]() {
         return std::chrono::duration<float>(Clock::now() - started).count();
     };
@@ -794,6 +794,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
     bool use_script_time = false;
     PuckInteraction puck_interaction;
     auto ui_time = [&]() { return use_script_time ? script_time : elapsed_seconds(); };
+    bool first_frame_logged = false;
     auto render = [&](bool present) {
         platform.display->make_current();
         media.poll();
@@ -805,6 +806,11 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         focus.sync();
         if (present) {
             platform.display->swap();
+            if (!first_frame_logged) {
+                first_frame_logged = true;
+                log::info("startup: first frame presented %.0f ms after launch",
+                          std::chrono::duration<float, std::milli>(Clock::now() - started).count());
+            }
         }
     };
 
@@ -921,6 +927,70 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         }
     };
 
+    // Startup runs off the UI thread. The window shows a loading state while
+    // the saved session is validated and, when needed, the pairing challenge
+    // is prepared; the QR appears as soon as the worker is done. Snapshot runs
+    // wait for the ready state so their single PPM is the QR or connecting
+    // screen instead of a loading frame.
+    if (snapshot_mode) {
+        startup.wait();
+        assets.wait();
+        upgrade_puck();
+    } else {
+        while (!quit) {
+            poll_debug_input();
+            if (upgrade_puck()) {
+                dirty = true;
+            }
+            const SessionStartupStatus session_status = startup.status();
+            const AssetFetchStatus asset_status = assets.status();
+            std::string loading_status = session_status.phase;
+            if (!asset_status.finished && asset_status.total > 0) {
+                loading_status = "Fetching assets " +
+                                 std::to_string(asset_status.completed) + "/" +
+                                 std::to_string(asset_status.total);
+            }
+            // Keep the window at the desktop cadence while startup runs so the
+            // Puck and the loading status are live, not a frozen first frame.
+            ui.set_pairing(QrCode{}, "Call Puck", loading_status);
+            sync_pairing();
+            render(true);
+            dirty = false;
+            if (session_status.finished &&
+                (!session_status.resumed || asset_status.finished)) {
+                break;
+            }
+            if (platform.display->should_close()) {
+                quit = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
+        if (quit) {
+            startup.wait();
+            assets.wait();
+            return 0;
+        }
+        startup.wait();
+    }
+
+    const SessionStartupStatus startup_status = startup.status();
+    if (startup_status.failed) {
+        log::error("startup failed: %s", startup_status.error.c_str());
+        assets.wait();
+        return 1;
+    }
+
+    PairingSession& pairing = startup.pairing();
+    CarSession session;
+    const bool resumed = startup.resumed();
+    if (resumed) {
+        session = startup.session();
+        log::info("startup: restored car session for thread %s; entering the car path",
+                  session.thread_id.c_str());
+    }
+    std::string error;
+
     auto show_challenge = [&]() {
         ui.set_pairing(pairing.qr(), "Call Puck", "Waiting for scan");
         sync_pairing();
@@ -929,20 +999,26 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
             dump_targets(ui.hit_map());
         }
         std::cout << pairing.pairing_url() << std::endl;
-        log::info("pairing QR written to %s", options.platform.output_path.c_str());
+        log::info("pairing: QR ready");
     };
 
     if (!resumed) {
         show_challenge();
     } else {
-        ui.set_pairing(pairing.qr(), "Connecting", "Restoring the saved session");
+        ui.set_pairing(pairing.qr(), "Connecting", "Restoring session");
         sync_pairing();
         render(true);
         if (options.dump_targets) {
             dump_targets(ui.hit_map());
         }
     }
+    if (platform.display->should_close() && options.input_script.empty()) {
+        assets.wait();
+        return 0;
+    }
     if (!options.input_script.empty()) {
+        assets.wait();
+        upgrade_puck();
         use_script_time = true;
         ScriptHooks hooks;
         hooks.router = &router;
@@ -994,10 +1070,15 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
     PairingState last_state = PairingState::Idle;
     auto next_poll = Clock::now();
     auto last_render = Clock::now();
-    while (!resumed && !quit && Clock::now() < deadline) {
+    while (!resumed && !quit && !platform.display->should_close() && Clock::now() < deadline) {
         poll_debug_input();
+        if (upgrade_puck()) {
+            dirty = true;
+        }
 
-        if (Clock::now() >= next_poll) {
+        // The asset fetch shares the serialized HTTP seam; let it finish
+        // before polling so a large download cannot stall the pairing screen.
+        if (Clock::now() >= next_poll && assets.finished()) {
             next_poll = Clock::now() + std::chrono::seconds(pairing.poll_interval_seconds());
             status = pairing.poll(&error);
             if (!error.empty()) {
@@ -1052,7 +1133,8 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
     }
 
-    if (quit) {
+    if (quit || platform.display->should_close()) {
+        assets.wait();
         return 0;
     }
     if (status.state != PairingState::Paired) {
@@ -1454,8 +1536,11 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
 
     bool running = !quit;
     bool car_dirty = true;
-    while (running &&
+    while (running && !platform.display->should_close() &&
            (observe_forever || Clock::now() < actor_deadline || (call && call->active()))) {
+        if (upgrade_puck()) {
+            car_dirty = true;
+        }
         std::string message;
         std::string poll_error;
         while (reader.take(&message, &poll_error)) {
@@ -1684,9 +1769,9 @@ int App::run(const AppOptions& options) {
 
     std::string error;
     PlatformOptions platform_options = options.platform;
-    if (options.pair || options.demo_call || !options.demo_media.empty()) {
-        // Pairing writes a snapshot after each state change, and the demos are
-        // a single frame; a larger counter would suppress those writes.
+    if (options.demo_call || !options.demo_media.empty()) {
+        // The demos are a single frame; a larger counter would suppress the
+        // PPM write they exist to produce.
         platform_options.frames = 1;
     }
     auto platform = create_platform(platform_options, &error);
@@ -1710,8 +1795,26 @@ int App::run(const AppOptions& options) {
         return 1;
     }
 
-    auto puck = create_puck_view(options.enable_3d);
-    log::info("Puck renderer: %s", puck->name());
+    PairingOptions pairing_options;
+    // Test hook: point the car/pairing endpoints at a local stand-in during
+    // desktop verification. Only loopback origins are accepted so a stray
+    // environment variable cannot redirect the session cookie jar.
+    if (const char* origin = std::getenv("PUCK_KIOSK_ORIGIN"); origin && *origin) {
+        const std::string value = origin;
+        static const std::regex loopback_re(
+            R"(^http://(?:127\.0\.0\.1|localhost|\[::1\])(?::[0-9]+)?/?$)");
+        if (std::regex_match(value, loopback_re)) {
+            pairing_options.origin = value;
+            log::info("origin override: %s", redact_url(pairing_options.origin).c_str());
+        } else {
+            log::warn("ignoring non-loopback origin override");
+        }
+    }
+
+    const bool demo = options.demo_call || !options.demo_media.empty();
+    auto puck = demo ? create_puck_view(options.enable_3d) : create_placeholder_puck_view();
+    log::info("Puck renderer: %s%s", puck->name(),
+              demo ? "" : " (placeholder while the asset cache is verified)");
 
     CarUi ui(*puck);
     if (platform->display->needs_client_caption()) {
@@ -1719,12 +1822,12 @@ int App::run(const AppOptions& options) {
         platform->display->set_client_caption(
             ClientCaption{CarUi::kCaptionHeight, CarUi::kCaptionButtonsWidth});
     }
-    MediaOverlay media(platform->http.get(), PairingOptions{}.origin, renderer.canvas());
+    MediaOverlay media(platform->http.get(), pairing_options.origin, renderer.canvas());
     ui.set_media(&media);
 
     PluginUi plugins;
     PasskeyFlow passkey;
-    Diagnostics diagnostics(platform->http.get(), PairingOptions{}.origin);
+    Diagnostics diagnostics(platform->http.get(), pairing_options.origin);
     diagnostics.set_environment(platform->display->size(), platform->display->dpi_scale(),
                                 platform->display->backend_name(),
                                 std::string(platform->display->backend_name()) != "headless");
@@ -1747,112 +1850,8 @@ int App::run(const AppOptions& options) {
         return run_demo_screen(options, *platform, renderer, ui, media, plugins, passkey,
                                diagnostics, false);
     }
-    if (options.pair) {
-        return run_pairing(options, *platform, renderer, ui, media, plugins, passkey, diagnostics);
-    }
-
-    const auto started = std::chrono::steady_clock::now();
-    bool running = true;
-    UiInputRouter router;
-    router.set_hit_map(&ui.hit_map());
-    UiFocus focus;
-    focus.set_hit_map(&ui.hit_map());
-    PuckInteraction puck_interaction;
-    UiActionHandlers handlers;
-    handlers.debug_open = [&]() { diagnostics.open(); };
-    handlers.debug_close = [&]() { diagnostics.close(); };
-    handlers.echo_mode = [&](int index) {
-        diagnostics.set_echo_mode(index == 0   ? EchoCancellationMode::On
-                                  : index == 1 ? EchoCancellationMode::RemoteOnly
-                                               : EchoCancellationMode::Off);
-    };
-    handlers.mic_test = [&]() {
-        std::string mic_error;
-        diagnostics.run_mic_test(platform->audio.get(), &mic_error);
-    };
-    add_window_handlers(&handlers, platform->display.get());
-    auto dismiss_overlay = [&]() -> bool {
-        if (diagnostics.is_open()) {
-            diagnostics.close();
-            return true;
-        }
-        return false;
-    };
-    auto toggle_debug = [&]() {
-        if (diagnostics.is_open()) {
-            diagnostics.close();
-        } else {
-            diagnostics.open();
-        }
-    };
-    auto handle_puck_pointer = [&](const InputEvent& event, float now) {
-        puck_interaction.set_bounds(ui.puck_bounds(), ui.puck_stage());
-        if (event.type == InputEvent::Type::PointerDown) {
-            if (!ui.hit_map().hit(event.x, event.y) && !diagnostics.is_open()) {
-                puck_interaction.pointer_down(event.x, event.y, now);
-            }
-        } else if (event.type == InputEvent::Type::PointerMove) {
-            puck_interaction.pointer_move(event.x, event.y, now);
-        } else if (event.type == InputEvent::Type::PointerUp) {
-            puck_interaction.pointer_up(event.x, event.y, now);
-        }
-    };
-
-    while (running && !platform->display->should_close()) {
-        const float elapsed =
-            std::chrono::duration<float>(std::chrono::steady_clock::now() - started).count();
-        const UiFocusResult hold = focus.update(elapsed);
-        if (hold.action != UiAction::None) {
-            apply_focus_result(hold, handlers, dismiss_overlay, toggle_debug, nullptr);
-        }
-        InputEvent event;
-        while (platform->input && platform->input->poll(event)) {
-            ui.notify_input(event);
-            handle_puck_pointer(event, elapsed);
-            const UiFocusResult focus_result = focus.handle(event, elapsed);
-            if (apply_focus_result(focus_result, handlers, dismiss_overlay, toggle_debug,
-                                   nullptr)) {
-                continue;
-            }
-
-            int index = -1;
-            const UiAction action = router.handle(event, &index);
-            if (action == UiAction::Escape) {
-                if (diagnostics.is_open()) {
-                    diagnostics.close();
-                } else {
-                    running = false;
-                }
-                continue;
-            }
-            dispatch_ui_action(action, index, handlers);
-        }
-        if (router.quit_requested()) {
-            running = false;
-        }
-        if (!running) {
-            break;
-        }
-
-        ui.set_debug(diagnostics.view());
-        puck_interaction.set_bounds(ui.puck_bounds(), ui.puck_stage());
-        puck_interaction.update(elapsed);
-        PuckVisual visual;
-        visual.pose = puck_interaction.pose();
-        ui.set_visual(visual);
-        platform->display->make_current();
-        media.poll();
-        focus.sync();
-        ui.set_focus(focus.view(elapsed, ui.hints_visible()));
-        renderer.begin(platform->display->size(), platform->display->dpi_scale());
-        ui.draw(renderer.canvas(), platform->display->size(), elapsed);
-        renderer.end();
-        focus.sync();
-        platform->display->swap();
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));
-    }
-
-    return 0;
+    return run_session(options, *platform, renderer, ui, media, plugins, passkey, diagnostics,
+                       pairing_options, puck);
 }
 
 }  // namespace pk
