@@ -93,6 +93,11 @@ private:
     int hold_index_ = -1;
     float hold_start_ = 0.0f;
 
+    // Back+Start held together for 1.5s reveals the hidden Debug entry.
+    bool back_held_ = false;
+    bool start_held_ = false;
+    float combo_start_ = -1.0f;
+
     bool axis_active_[2] = {false, false};
 };
 

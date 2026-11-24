@@ -177,6 +177,10 @@ float UiFocus::hold_progress(float now) const {
 
 UiFocusResult UiFocus::update(float now) {
     UiFocusResult result;
+    if (combo_start_ >= 0.0f && now - combo_start_ >= 1.5f) {
+        combo_start_ = -1.0f;
+        result.toggle_debug = true;
+    }
     if (!hold_active_) {
         return result;
     }
@@ -222,11 +226,22 @@ UiFocusResult UiFocus::handle(const InputEvent& event, float now) {
                 case InputEvent::GamepadButton::B:
                 case InputEvent::GamepadButton::Back:
                     cancel_hold();
+                    if (event.type == InputEvent::Type::GamepadButtonDown) {
+                        back_held_ = true;
+                        if (start_held_) {
+                            combo_start_ = now;
+                        }
+                    }
                     result.dismiss = true;
                     break;
                 case InputEvent::GamepadButton::Start:
                     cancel_hold();
-                    result.toggle_debug = true;
+                    if (event.type == InputEvent::Type::GamepadButtonDown) {
+                        start_held_ = true;
+                        if (back_held_) {
+                            combo_start_ = now;
+                        }
+                    }
                     break;
                 case InputEvent::GamepadButton::DPadUp:
                     move(FocusDirection::Up);
@@ -249,6 +264,14 @@ UiFocusResult UiFocus::handle(const InputEvent& event, float now) {
             result.consumed = true;
             if (event.button == InputEvent::GamepadButton::A && hold_active_ && !hold_pointer_) {
                 cancel_hold();
+            }
+            if (event.button == InputEvent::GamepadButton::Back) {
+                back_held_ = false;
+                combo_start_ = -1.0f;
+            }
+            if (event.button == InputEvent::GamepadButton::Start) {
+                start_held_ = false;
+                combo_start_ = -1.0f;
             }
             break;
 

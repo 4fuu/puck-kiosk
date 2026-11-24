@@ -49,12 +49,6 @@ Color fade(Color color, float alpha) {
     return color;
 }
 
-Color mix(Color base, Color over, float amount) {
-    const float t = std::clamp(amount, 0.0f, 1.0f);
-    return Color{base.r + (over.r - base.r) * t, base.g + (over.g - base.g) * t,
-                 base.b + (over.b - base.b) * t, 1.0f};
-}
-
 float clamp01(float value) {
     return std::clamp(value, 0.0f, 1.0f);
 }
@@ -659,7 +653,6 @@ enum class HintBadge {
     A,
     B,
     DPad,
-    Start,
 };
 
 struct HintItem {
@@ -707,15 +700,6 @@ void draw_hint_badge(Canvas& canvas, HintBadge badge, float center_x, float cent
         canvas.fill_rect(Rect{center_x - diameter * 0.09f, center_y - diameter * 0.28f,
                               diameter * 0.18f, diameter * 0.56f},
                          ink);
-        return;
-    }
-    const float width = diameter * 0.48f;
-    const float height = diameter * 0.09f;
-    for (int i = -1; i <= 1; ++i) {
-        canvas.fill_rect(Rect{center_x - width * 0.5f,
-                              center_y + static_cast<float>(i) * diameter * 0.20f - height * 0.5f,
-                              width, height},
-                         ink);
     }
 }
 
@@ -761,7 +745,17 @@ void CarUi::notify_input(const InputEvent& event) {
                                event.y > static_cast<float>(last_size_.height) - corner;
         if (event.type == InputEvent::Type::PointerDown && in_corner) {
             corner_holding_ = true;
-            corner_hold_start_ = std::chrono::steady_clock::now();
+            corner_hold_start_ = last_draw_time_;
+            if (tap_window_start_ < 0.0f || last_draw_time_ - tap_window_start_ > 2.5f) {
+                corner_taps_ = 0;
+                tap_window_start_ = last_draw_time_;
+            }
+            ++corner_taps_;
+            if (corner_taps_ >= 5) {
+                debug_revealed_ = true;
+                corner_taps_ = 0;
+                tap_window_start_ = -1.0f;
+            }
         } else if (!in_corner || event.type == InputEvent::Type::PointerUp) {
             corner_holding_ = false;
         }
@@ -836,7 +830,6 @@ void CarUi::draw_focus_overlay(Canvas& canvas, Size size) {
     if (overlay_open) {
         items.push_back(HintItem{HintBadge::B, "Back"});
     }
-    items.push_back(HintItem{HintBadge::Start, debug_.open ? "Close debug" : "Debug"});
 
     auto total_width = [&]() {
         float total = 0.0f;
@@ -859,7 +852,7 @@ void CarUi::draw_focus_overlay(Canvas& canvas, Size size) {
         return false;
     };
     while (total_width() > available && items.size() > 1) {
-        if (drop(HintBadge::DPad) || drop(HintBadge::Start) || drop(HintBadge::B)) {
+        if (drop(HintBadge::DPad) || drop(HintBadge::B)) {
             continue;
         }
         break;
@@ -948,8 +941,8 @@ float CarUi::control_split(float time_seconds, bool in_call) {
 
 void CarUi::draw(Canvas& canvas, Size size, float time_seconds) {
     last_size_ = size;
-    if (corner_holding_ &&
-        std::chrono::steady_clock::now() - corner_hold_start_ >= std::chrono::seconds(2)) {
+    last_draw_time_ = time_seconds;
+    if (corner_holding_ && time_seconds - corner_hold_start_ >= 2.0f) {
         debug_revealed_ = true;
         corner_holding_ = false;
     }

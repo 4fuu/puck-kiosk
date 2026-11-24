@@ -535,6 +535,22 @@ void test_car_ui_targets() {
     reveal.key = 123;
     ui.notify_input(reveal);
     ui.draw(canvas, pk::Size{1280, 720}, 0.0f);
+    CHECK(find_target(ui.hit_map(), pk::UiAction::DebugOpen) != nullptr);
+    // F12 again hides it; five quick corner taps reveal it for touch users.
+    ui.notify_input(reveal);
+    ui.draw(canvas, pk::Size{1280, 720}, 0.1f);
+    CHECK(find_target(ui.hit_map(), pk::UiAction::DebugOpen) == nullptr);
+    for (int i = 0; i < 5; ++i) {
+        pk::InputEvent tap;
+        tap.type = pk::InputEvent::Type::PointerDown;
+        tap.x = 20.0f;
+        tap.y = 700.0f;
+        ui.notify_input(tap);
+        tap.type = pk::InputEvent::Type::PointerUp;
+        ui.notify_input(tap);
+        ui.draw(canvas, pk::Size{1280, 720}, 0.2f + 0.1f * static_cast<float>(i));
+    }
+    CHECK(find_target(ui.hit_map(), pk::UiAction::DebugOpen) != nullptr);
 
     const pk::UiTarget* mute = find_target(ui.hit_map(), pk::UiAction::Mute);
     const pk::UiTarget* end = find_target(ui.hit_map(), pk::UiAction::End);
@@ -763,14 +779,23 @@ void test_focus_actions() {
     CHECK(!focus.hold_active());
     CHECK(focus.focused_action() == pk::UiAction::Mute);
 
-    // B dismisses the topmost overlay; Start toggles Debug.
+    // B dismisses the topmost overlay; Start alone does nothing (Debug needs
+    // the Back+Start hold, so a stray Start press cannot open it).
     result = focus.handle(gamepad_button(pk::InputEvent::GamepadButton::B, true), 6.0f);
     CHECK(result.consumed && result.dismiss);
     result = focus.handle(gamepad_button(pk::InputEvent::GamepadButton::Back, true), 6.05f);
     CHECK(result.consumed && result.dismiss);
     result =
         focus.handle(gamepad_button(pk::InputEvent::GamepadButton::Start, true), 6.1f);
-    CHECK(result.consumed && result.toggle_debug);
+    CHECK(!result.toggle_debug);
+    CHECK(focus.update(6.5f).toggle_debug == false);
+    // Back+Start held together for 1.5s reveals Debug.
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::Back, false), 6.2f);
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::Start, false), 6.2f);
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::Back, true), 7.0f);
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::Start, true), 7.1f);
+    CHECK(focus.update(8.0f).toggle_debug == false);
+    CHECK(focus.update(8.7f).toggle_debug == true);
 
     // Pointer press on End starts the same hold; release cancels.
     focus.handle(gamepad_button(pk::InputEvent::GamepadButton::DPadRight, true), 7.0f);

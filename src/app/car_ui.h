@@ -9,7 +9,6 @@
 #include "core/types.h"
 #include "render/canvas.h"
 
-#include <chrono>
 #include <string>
 
 namespace pk {
@@ -67,12 +66,15 @@ private:
     UiFocusView focus_;
     bool hints_visible_ = false;
     // The Debug entry stays invisible in normal use: hold the bottom-left
-    // corner for 2s (pointer/touch) or press F12 to reveal it; gamepad Start
-    // opens the panel directly. It hides again when the panel closes.
+    // corner for 2s or tap it 5 times within 2.5s (pointer/touch), press F12,
+    // or hold Back+Start on a gamepad for 1.5s. It hides again when the panel
+    // closes.
     bool debug_revealed_ = false;
     bool debug_was_open_ = false;
     bool corner_holding_ = false;
-    std::chrono::steady_clock::time_point corner_hold_start_;
+    float corner_hold_start_ = 0.0f;
+    int corner_taps_ = 0;
+    float tap_window_start_ = -1.0f;
     Size last_size_;
 
     // The web page animates the single call button into Mute/End over 400ms

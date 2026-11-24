@@ -271,9 +271,18 @@ void NanoVgCanvas::stroke_line(float x0, float y0, float x1, float y1, float wid
 void NanoVgCanvas::text(float x, float y, const TextStyle& style, const std::string& value) {
     apply_text_state(context_, style, bold_face_);
     nvgFillColor(context_, to_nvg(style.color));
+    float draw_y = y;
+    if (style.valign == TextVAlign::Middle) {
+        // The font's metric middle sits above the ink middle for most faces;
+        // center the actual glyph box so labels look centered in their rects.
+        nvgTextAlign(context_, to_align(style.align, TextVAlign::Baseline));
+        float bounds[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        nvgTextBounds(context_, 0.0f, 0.0f, value.c_str(), nullptr, bounds);
+        draw_y = y - (bounds[1] + bounds[3]) * 0.5f;
+    }
     const float offset = weight_offset(style, bold_face_);
     if (offset <= 0.0f) {
-        nvgText(context_, x, y, value.c_str(), nullptr);
+        nvgText(context_, x, draw_y, value.c_str(), nullptr);
         return;
     }
     float anchor = x;
@@ -282,8 +291,8 @@ void NanoVgCanvas::text(float x, float y, const TextStyle& style, const std::str
     } else if (style.align == TextAlign::Right) {
         anchor -= offset;
     }
-    nvgText(context_, anchor, y, value.c_str(), nullptr);
-    nvgText(context_, anchor + offset, y, value.c_str(), nullptr);
+    nvgText(context_, anchor, draw_y, value.c_str(), nullptr);
+    nvgText(context_, anchor + offset, draw_y, value.c_str(), nullptr);
 }
 
 float NanoVgCanvas::measure_text(const TextStyle& style, const std::string& value) {
