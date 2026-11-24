@@ -16,6 +16,7 @@
 #if defined(PUCK_KIOSK_BACKEND_WIN32)
 #include "platform/win32/win32_audio.h"
 #include "platform/win32/win32_display.h"
+#include "platform/win32/xinput_input.h"
 #endif
 
 namespace pk {
@@ -31,7 +32,7 @@ std::unique_ptr<Platform> create_platform(const PlatformOptions& options, std::s
         const bool visible = options.backend == "win32";
         auto display = std::make_unique<Win32Display>(options.width, options.height,
                                                       options.output_path, options.frames, visible);
-        platform->input = std::make_unique<Win32Input>(*display);
+        platform->input = std::make_unique<Win32CombinedInput>(*display);
         platform->display = std::move(display);
     } else
 #else
