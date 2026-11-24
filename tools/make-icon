@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Render the Puck Kiosk Windows icon from the fetched 2D Puck sprite.
 
-The icon is a rounded square in the app's stage background colour with the
-Puck sprite drawn large inside it, his body filling the tile edge to edge.
+The icon is a rounded square filled with the app's secondary colour gradient
+(#2f372f to #1a231c, from car_ui.cpp) with the Puck sprite drawn large inside
+it, his body filling the tile edge to edge.
 
 The sprite and the rendered icon are Amp art, so neither is committed: the
 sprite lives in the gitignored assets/cache and the icon in the gitignored
@@ -22,7 +23,8 @@ from pathlib import Path
 
 TILE = 1024
 CORNER_RADIUS = round(TILE * 0.22)  # conventional app-icon corner radius
-BACKGROUND = "#0b0d0b"  # app stage background
+BACKGROUND_TOP = "#2f372f"  # app secondary colour (car_ui.cpp kSecondary)
+BACKGROUND_BOTTOM = "#1a231c"
 SPRITE_CROP = "440x520+30+10"  # Puck's body; the legs are cropped by the tile
 SPRITE_SCALE = 1.12  # relative to the sprite filling the tile
 SPRITE_CENTER = (0.58, 0.61)  # sprite centre, as a fraction of the tile side
@@ -74,7 +76,7 @@ def main() -> int:
             magick,
             "-size",
             f"{TILE}x{TILE}",
-            f"xc:{BACKGROUND}",
+            f"gradient:{BACKGROUND_TOP}-{BACKGROUND_BOTTOM}",
             "(",
             str(sprite),
             "-crop",
