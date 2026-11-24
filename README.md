@@ -115,6 +115,16 @@ wine build/mingw/x64/release/puck-kiosk.exe --pair --frames 0
 monitor's native size it also covers the taskbar. Windowed mode remains the
 default.
 
+Windowed and fullscreen rendering is supersampled. The app draws into an
+offscreen framebuffer at `client size * render scale` (auto: 2x, multiplied by
+`dpi/96` on a high-DPI panel) and downsamples it to the window with a linear
+blit, so the 2D canvas and the 3D Puck get the same edge smoothing. Pass
+`--render-scale <1..3>` to change it; `--render-scale 1` renders 1:1 and
+reproduces the pre-supersample output. The target is capped at 24M pixels
+(about 192 MB with depth-stencil) so a 4K or high-DPI surface stays inside the
+memory budget. The hidden `--platform headless` PPM path always renders 1:1 so
+PPM comparisons stay valid.
+
 The UI font comes from `%WINDIR%\Fonts` (Segoe UI, then Arial) unless `--font`
 is given. On a high-DPI display the process is per-monitor DPI aware, but the
 layout is pixel-based; pass `--width` and `--height` that match the panel.
@@ -154,13 +164,15 @@ variant has not been exercised in this orb.
   no mingw/Windows xmake package. The startup log says
   `AEC: built without webrtc-audio-processing on Windows`. Opus and
   libdatachannel are still linked, so a call works without AEC.
-- The 3D Puck is not built for `--backend=win32`; the Windows backend uses
-  `Puck2D`. The Canvas is desktop GL 3.3, while `Puck3D` is a GLES 3.0
-  renderer.
-- DPI awareness is per-monitor v2, but `Display::dpi_scale()` returns 1.0 and
-  the layout is pixel-based. The window is sharp on high-DPI screens but the
-  UI is physically smaller unless `--width`/`--height` are raised. There is no
-  automatic re-layout when the window moves to another monitor.
+- The 3D Puck is built for `--backend=win32` through the desktop GL 3.3
+  loader. It renders at the supersample resolution and falls back to `Puck2D`
+  when assets or shaders are unavailable.
+- DPI awareness is per-monitor v2. The layout is pixel-based; `dpi_scale()`
+  reports the supersample factor (render scale times `dpi/96`), so the canvas
+  and Puck3D render at that density and the window blits back to the client
+  size. The UI is still physically smaller on a high-DPI panel unless
+  `--width`/`--height` are raised, and there is no automatic re-layout when
+  the window moves to another monitor.
 - Input is windowed: `WM_POINTER` for touch and pen, `WM_TOUCH` as the fallback
   on systems without the pointer API, `WM_MOUSE*` for the mouse, and
   `WM_KEYDOWN`/`WM_CHAR`. There is no IME or text-entry field yet, and no
@@ -220,7 +232,7 @@ Puck asset details, the media-presentation flow, and the porting checklist.
 | --- | --- | --- |
 | headless | Works | EGL surfaceless + llvmpipe; used for CI and orb screenshots |
 | DRM/KMS | Implemented, unverified on hardware | Direct scanout + libinput/evdev input; build with `--backend=drm` |
-| win32 | Implemented, smoke-tested under wine | Win32 + WGL OpenGL 3.3 core, NanoVG GL3, pointer/touch/mouse, WASAPI; 2D Puck only |
+| win32 | Implemented, smoke-tested under wine | Win32 + WGL OpenGL 3.3 core, NanoVG GL3, 2x supersampling, pointer/touch/mouse, WASAPI; 2D or 3D Puck |
 | Wayland | Planned | Desktop and compositor-based embedded images |
 | X11 | Planned | Desktop fallback |
 

@@ -29,6 +29,7 @@
 #define glBindFramebuffer nvg_gl3.BindFramebuffer
 #define glBindRenderbuffer nvg_gl3.BindRenderbuffer
 #define glBindVertexArray nvg_gl3.BindVertexArray
+#define glBlitFramebuffer nvg_gl3.BlitFramebuffer
 #define glBufferData nvg_gl3.BufferData
 #define glCheckFramebufferStatus nvg_gl3.CheckFramebufferStatus
 #define glCompileShader nvg_gl3.CompileShader

@@ -44,6 +44,7 @@ extern "C" int nvg_gl3_load_functions(const char** missing) {
     PK_LOAD_GL3(BindRenderbuffer, PFNGLBINDRENDERBUFFERPROC, "glBindRenderbuffer");
     PK_LOAD_GL3(BindVertexArray, PFNGLBINDVERTEXARRAYPROC, "glBindVertexArray");
     PK_LOAD_GL3(BlendFuncSeparate, PFNGLBLENDFUNCSEPARATEPROC, "glBlendFuncSeparate");
+    PK_LOAD_GL3(BlitFramebuffer, PFNGLBLITFRAMEBUFFERPROC, "glBlitFramebuffer");
     PK_LOAD_GL3(BufferData, PFNGLBUFFERDATAPROC, "glBufferData");
     PK_LOAD_GL3(CheckFramebufferStatus, PFNGLCHECKFRAMEBUFFERSTATUSPROC,
                 "glCheckFramebufferStatus");

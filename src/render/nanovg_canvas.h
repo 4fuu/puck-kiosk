@@ -20,6 +20,7 @@ public:
     void restore() override;
     void translate(float dx, float dy) override;
     void translation(float* x, float* y) const override;
+    float pixel_scale() const override { return dpi_scale_; }
 
     ImageHandle create_image(const std::uint8_t* rgba, int width, int height) override;
     void draw_image(ImageHandle image, Rect rect, float alpha) override;

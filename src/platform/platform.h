@@ -15,6 +15,9 @@ struct PlatformOptions {
     int width = 1280;
     int height = 720;
     int frames = 1;
+    // Supersampling factor for the visible win32 window. 0 picks the backend
+    // default: 2 on a visible win32 window, 1 everywhere else.
+    float render_scale = 0.0f;
     bool fullscreen = false;
     std::string output_path;
     std::string audio_backend = "auto";  // auto | file | null | alsa

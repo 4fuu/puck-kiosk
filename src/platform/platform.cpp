@@ -25,12 +25,25 @@ std::unique_ptr<Platform> create_platform(const PlatformOptions& options, std::s
     auto platform = std::make_unique<Platform>();
 
 #if defined(PUCK_KIOSK_BACKEND_WIN32)
+    const bool win32_visible = options.backend == "win32";
+#else
+    const bool win32_visible = false;
+#endif
+    if (options.render_scale > 0.0f && !win32_visible) {
+        log::warn("--render-scale applies to the visible win32 window; rendering 1:1");
+    }
+
+#if defined(PUCK_KIOSK_BACKEND_WIN32)
     // A Windows build has WGL instead of EGL. The "headless" name keeps the
     // existing CLI and CI scripts working: it creates the same WGL context on
     // a hidden window and still writes the PPM frame.
     if (options.backend == "headless" || options.backend == "win32") {
         const bool visible = options.backend == "win32";
-        auto display = std::make_unique<Win32Display>(options.width, options.height,
+        // A hidden window only writes the PPM; keep it 1:1 so frame
+        // comparisons against the Linux headless output stay valid.
+        const float render_scale =
+            visible ? (options.render_scale > 0.0f ? options.render_scale : 2.0f) : 1.0f;
+        auto display = std::make_unique<Win32Display>(options.width, options.height, render_scale,
                                                       options.output_path, options.frames, visible,
                                                       visible && options.fullscreen);
         platform->input = std::make_unique<Win32CombinedInput>(*display);

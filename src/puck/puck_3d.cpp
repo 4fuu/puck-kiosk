@@ -1283,23 +1283,34 @@ void Puck3D::Impl::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual,
         return;
     }
     // The 2D canvas may be translated (the client caption strip shifts app
-    // content down). The composite pass uses raw GL, so move the layout into
-    // surface space here; a zero translation keeps the old coordinates.
+    // content down) and may render at a supersampled resolution. The
+    // composite pass uses raw GL, so move the layout into surface pixels
+    // here; a zero translation and a scale of 1 keep the old coordinates.
     float canvas_x = 0.0f;
     float canvas_y = 0.0f;
     canvas.translation(&canvas_x, &canvas_y);
-    const Rect surface_bounds{bounds.x + canvas_x, bounds.y + canvas_y, bounds.w, bounds.h};
-    const Rect surface_stage{stage.x + canvas_x, stage.y + canvas_y, stage.w, stage.h};
+    const float canvas_scale = canvas.pixel_scale();
+    const float pixel_scale = canvas_scale > 0.0f ? canvas_scale : 1.0f;
+    const Rect layout_bounds{bounds.x + canvas_x, bounds.y + canvas_y, bounds.w, bounds.h};
+    const Rect layout_stage{stage.x + canvas_x, stage.y + canvas_y, stage.w, stage.h};
+    const Rect surface_bounds{layout_bounds.x * pixel_scale, layout_bounds.y * pixel_scale,
+                              layout_bounds.w * pixel_scale, layout_bounds.h * pixel_scale};
+    const Rect surface_stage{layout_stage.x * pixel_scale, layout_stage.y * pixel_scale,
+                             layout_stage.w * pixel_scale, layout_stage.h * pixel_scale};
     const float fit = std::min(surface_bounds.w / static_cast<float>(rig.width),
                                surface_bounds.h / static_cast<float>(rig.height));
-    const float image_width = fit * static_cast<float>(rig.width);
-    const float image_height = fit * static_cast<float>(rig.height);
-    const float image_left = surface_bounds.center_x() - image_width * 0.5f;
-    const float image_top = surface_bounds.center_y() - image_height * 0.5f;
+    // Eye tracking compares layout-space pointer coordinates with the Puck's
+    // layout rect, so keep this part unscaled.
+    const float layout_fit = std::min(layout_bounds.w / static_cast<float>(rig.width),
+                                      layout_bounds.h / static_cast<float>(rig.height));
+    const float layout_image_width = layout_fit * static_cast<float>(rig.width);
+    const float layout_image_height = layout_fit * static_cast<float>(rig.height);
+    const float layout_image_left = layout_bounds.center_x() - layout_image_width * 0.5f;
+    const float layout_image_top = layout_bounds.center_y() - layout_image_height * 0.5f;
     update_animation(&animation, visual, std::max(0.0f, time_seconds),
-                     image_left + image_width * kPuckEyeX,
-                     image_top + image_height * kPuckEyeY,
-                     std::max(160.0f, surface_bounds.w * 1.5f));
+                     layout_image_left + layout_image_width * kPuckEyeX,
+                     layout_image_top + layout_image_height * kPuckEyeY,
+                     std::max(160.0f, layout_bounds.w * 1.5f));
 
     GLint surface[4] = {0, 0, 0, 0};
     glGetIntegerv(GL_VIEWPORT, surface);

@@ -132,6 +132,19 @@ int main() {
         return fail("renderer: " + error);
     }
 
+    // Puck3D reads the layout-to-surface factor through the Canvas seam. It
+    // must follow begin_frame and survive the flush that submits the 2D layer.
+    renderer.begin(display.size(), 2.0f);
+    if (renderer.canvas().pixel_scale() != 2.0f) {
+        return fail("canvas pixel_scale does not follow begin_frame");
+    }
+    renderer.canvas().flush();
+    if (renderer.canvas().pixel_scale() != 2.0f) {
+        return fail("canvas pixel_scale does not survive flush");
+    }
+    renderer.end();
+    std::printf("PASS: canvas reports the supersample pixel scale\n");
+
     FakePuck puck;
     pk::CarUi ui(puck);
     ui.set_call(pk::CallView{});

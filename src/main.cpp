@@ -2,6 +2,8 @@
 
 #include "core/log.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -21,6 +23,8 @@ void print_help(const char* program) {
               << "  --fullscreen            Borderless win32 window with an exact --width/--height client\n"
               << "  --width <px>            Surface width (default 1280)\n"
               << "  --height <px>           Surface height (default 720)\n"
+              << "  --render-scale <f>      Supersample factor 1..3 for the visible win32 window\n"
+              << "                          (default 2; 1 disables supersampling)\n"
               << "  --frames <n>            Render n frames (default 1; 0 = until the win32 window closes)\n"
               << "  --out <path>            PPM output for the last rendered frame\n"
               << "  --font <path>           TTF/OTF font used by the 2D canvas\n"
@@ -77,6 +81,19 @@ bool parse_nonnegative_int(const char* value, int* out) {
         return false;
     }
     *out = static_cast<int>(parsed);
+    return true;
+}
+
+bool parse_render_scale(const char* value, float* out) {
+    if (!value || *value == '\0') {
+        return false;
+    }
+    char* end = nullptr;
+    const float parsed = std::strtof(value, &end);
+    if (end == value || *end != '\0' || !std::isfinite(parsed)) {
+        return false;
+    }
+    *out = std::clamp(parsed, 1.0f, 3.0f);
     return true;
 }
 
@@ -261,6 +278,13 @@ int main(int argc, char** argv) {
         if (argument == "--height" && i + 1 < argc) {
             if (!parse_int(argv[++i], &options.platform.height)) {
                 pk::log::error("invalid --height");
+                return 2;
+            }
+            continue;
+        }
+        if (argument == "--render-scale" && i + 1 < argc) {
+            if (!parse_render_scale(argv[++i], &options.platform.render_scale)) {
+                pk::log::error("invalid --render-scale (expected a number from 1 to 3)");
                 return 2;
             }
             continue;

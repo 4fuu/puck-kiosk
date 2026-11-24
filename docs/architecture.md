@@ -137,8 +137,22 @@ no OS headers.
   PPM, which is the Windows equivalent of the Linux headless smoke test.
   `--frames 0` keeps the window open until `WM_CLOSE`, `WM_DESTROY`, or Escape.
 - The process is per-monitor DPI aware (v2 when the OS provides
-  `SetProcessDpiAwarenessContext`). Layout coordinates stay in pixels and
-  `dpi_scale()` returns 1.0, so the render size is the physical client size.
+  `SetProcessDpiAwarenessContext`). Layout coordinates stay in client pixels.
+  Windowed and fullscreen rendering is supersampled: `Win32Display` allocates
+  RGBA8 color and depth-stencil renderbuffers at
+  `client size * effective_scale`, attaches them to a framebuffer, binds that
+  framebuffer in `make_current()`, and `swap()` downsamples it to the default
+  framebuffer with `glBlitFramebuffer(..., GL_LINEAR)`. `effective_scale` is
+  `--render-scale` (default 2 on a visible window, 1 hidden) times `dpi/96`,
+  capped by a 24M-pixel budget so a 4K or high-DPI surface stays inside the
+  memory target. `display.size()` stays the client size, so layout and input
+  math are unchanged; `dpi_scale()` reports `effective_scale` so NanoVG maps
+  client coordinates to supersample pixels. `--render-scale 1` bypasses the
+  target and renders 1:1.
+- `Canvas::pixel_scale()` exposes the same factor to raw-GL compositors.
+  Puck3D multiplies its surface-space bounds, stage, and projection offset by
+  it and sizes its offscreen target accordingly, so the 3D pass is
+  supersampled too.
 - `Win32Input` pumps the Win32 message queue and converts
   `WM_POINTERDOWN/UPDATE/UP` (touch and pen) into the existing `InputEvent`
   types. Systems without the pointer API use `WM_TOUCH` instead, and the mouse

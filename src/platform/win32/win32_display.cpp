@@ -22,9 +22,10 @@
 #include <GL/gl.h>
 #include <GL/wglext.h>
 
-#include "nanovg_gl3_functions.h"
+#include "platform/win32/gl3_api.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <deque>
@@ -36,6 +37,11 @@ namespace pk {
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"PuckKioskWin32Window";
+
+// Keep the supersample target inside the 512 MB budget on large or high-DPI
+// panels. 24M pixels is 192 MB for RGBA8 color plus DEPTH24_STENCIL8; the
+// 1920x1080 default at 2x uses 8.3M pixels.
+constexpr double kMaxSupersamplePixels = 24.0 * 1024.0 * 1024.0;
 
 using GetPointerInfoFn = BOOL(WINAPI*)(UINT32, POINTER_INFO*);
 using SetProcessDpiAwarenessContextFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
@@ -64,6 +70,15 @@ struct Win32Display::Impl {
     int height = 720;
     int frames = 1;
     int frame = 0;
+    float render_scale = 1.0f;
+    float effective_scale = 1.0f;
+    UINT dpi = 96;
+    GLuint supersample_fbo = 0;
+    GLuint supersample_color = 0;
+    GLuint supersample_depth = 0;
+    int supersample_width = 0;
+    int supersample_height = 0;
+    bool supersample_disabled = false;
     bool visible = true;
     bool fullscreen = false;
     bool quit = false;
@@ -81,7 +96,109 @@ struct Win32Display::Impl {
 
     ~Impl() { destroy(); }
 
+    void destroy_supersample() {
+        if (gl) {
+            if (supersample_depth) {
+                glDeleteRenderbuffers(1, &supersample_depth);
+            }
+            if (supersample_color) {
+                glDeleteRenderbuffers(1, &supersample_color);
+            }
+            if (supersample_fbo) {
+                glDeleteFramebuffers(1, &supersample_fbo);
+            }
+        }
+        supersample_depth = 0;
+        supersample_color = 0;
+        supersample_fbo = 0;
+        supersample_width = 0;
+        supersample_height = 0;
+    }
+
+    // The window is per-monitor DPI aware, so the client size is already in
+    // physical pixels. dpi/96 only raises the supersample density on a
+    // high-DPI panel; the blit still maps back to the client size. The pixel
+    // budget keeps a 4K or high-DPI surface inside the memory target.
+    void update_effective_scale() {
+        if (supersample_disabled) {
+            effective_scale = 1.0f;
+            return;
+        }
+        const float requested = render_scale * static_cast<float>(dpi) / 96.0f;
+        const double pixels = static_cast<double>(width) * static_cast<double>(height);
+        const double max_scale =
+            std::sqrt(kMaxSupersamplePixels / std::max(1.0, pixels));
+        float scale = std::max(1.0f, requested);
+        if (scale > max_scale) {
+            scale = std::max(1.0f, static_cast<float>(max_scale));
+            if (std::abs(scale - effective_scale) > 0.001f) {
+                log::warn("win32: supersample scale %.2f exceeds the %dx%d pixel budget; using %.2f",
+                          requested, width, height, scale);
+            }
+        }
+        effective_scale = scale;
+    }
+
+    bool ensure_supersample() {
+        if (supersample_disabled || effective_scale <= 1.0f + 1e-4f) {
+            destroy_supersample();
+            return true;
+        }
+        const int wanted_width =
+            std::max(1, static_cast<int>(std::lround(width * effective_scale)));
+        const int wanted_height =
+            std::max(1, static_cast<int>(std::lround(height * effective_scale)));
+        if (supersample_fbo && wanted_width == supersample_width &&
+            wanted_height == supersample_height) {
+            return true;
+        }
+        destroy_supersample();
+
+        glGenFramebuffers(1, &supersample_fbo);
+        glGenRenderbuffers(1, &supersample_color);
+        glGenRenderbuffers(1, &supersample_depth);
+        if (!supersample_fbo || !supersample_color || !supersample_depth) {
+            log::error("win32: cannot allocate the %dx%d supersample target; rendering 1:1",
+                       wanted_width, wanted_height);
+            destroy_supersample();
+            supersample_disabled = true;
+            effective_scale = 1.0f;
+            return false;
+        }
+        glBindRenderbuffer(GL_RENDERBUFFER, supersample_color);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, wanted_width, wanted_height);
+        glBindRenderbuffer(GL_RENDERBUFFER, supersample_depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, wanted_width, wanted_height);
+        glBindFramebuffer(GL_FRAMEBUFFER, supersample_fbo);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
+                                  supersample_color);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
+                                  supersample_depth);
+        const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            log::error("win32: supersample target is incomplete (0x%x); rendering 1:1", status);
+            destroy_supersample();
+            supersample_disabled = true;
+            effective_scale = 1.0f;
+            return false;
+        }
+        supersample_width = wanted_width;
+        supersample_height = wanted_height;
+        const double color_mb =
+            static_cast<double>(wanted_width) * wanted_height * 4.0 / 1e6;
+        log::info("win32: supersample %dx%d (%.1f MB color, %.1f MB with depth-stencil), "
+                  "scale %.2f",
+                  wanted_width, wanted_height, color_mb, color_mb * 2.0, effective_scale);
+        return true;
+    }
+
     void destroy() {
+        if (gl && dc) {
+            wglMakeCurrent(dc, gl);
+        }
+        destroy_supersample();
         if (gl) {
             wglMakeCurrent(nullptr, nullptr);
             wglDeleteContext(gl);
@@ -470,11 +587,12 @@ struct Win32Display::Impl {
     }
 };
 
-Win32Display::Win32Display(int width, int height, std::string output_path, int frames, bool visible,
-                           bool fullscreen)
+Win32Display::Win32Display(int width, int height, float render_scale, std::string output_path,
+                           int frames, bool visible, bool fullscreen)
     : impl_(std::make_unique<Impl>()) {
     impl_->width = width > 0 ? width : 1280;
     impl_->height = height > 0 ? height : 720;
+    impl_->render_scale = std::clamp(render_scale, 1.0f, 3.0f);
     impl_->frames = frames < 0 ? 0 : frames;
     impl_->visible = visible;
     impl_->fullscreen = fullscreen;
@@ -653,11 +771,14 @@ bool Win32Display::initialize(std::string* error) {
             dpi = get_dpi(impl_->hwnd);
         }
     }
+    impl_->dpi = dpi;
+    impl_->update_effective_scale();
     const char* mode =
         !impl_->visible ? "hidden" : (impl_->fullscreen ? "fullscreen" : "window");
-    log::info("win32: WGL %s, GL %s, renderer %s, dpi %u%s", mode,
+    log::info("win32: WGL %s, GL %s, renderer %s, dpi %u, render scale %.2f%s", mode,
               reinterpret_cast<const char*>(glGetString(GL_VERSION)),
               reinterpret_cast<const char*>(glGetString(GL_RENDERER)), dpi,
+              impl_->effective_scale,
               dpi == 96 ? "" : " (layout is pixel-based; size the window with --width/--height)");
     RECT outer = {};
     GetWindowRect(impl_->hwnd, &outer);
@@ -665,6 +786,7 @@ bool Win32Display::initialize(std::string* error) {
               static_cast<int>(outer.right - outer.left),
               static_cast<int>(outer.bottom - outer.top),
               impl_->fullscreen ? "fullscreen" : "windowed");
+    impl_->ensure_supersample();
     return true;
 }
 
@@ -673,10 +795,10 @@ Size Win32Display::size() const {
 }
 
 float Win32Display::dpi_scale() const {
-    // The window is per-monitor DPI aware, so its client area is already in
-    // physical pixels. Layout coordinates are pixels too; NanoVG must not
-    // scale them a second time.
-    return 1.0f;
+    // Layout coordinates stay in client pixels; this factor maps them to the
+    // supersample target, so NanoVG and Puck3D render at the higher density.
+    // It is 1.0 when the window renders 1:1.
+    return impl_->effective_scale;
 }
 
 void Win32Display::make_current() {
@@ -686,13 +808,16 @@ void Win32Display::make_current() {
     wglMakeCurrent(impl_->dc, impl_->gl);
     RECT client = {};
     GetClientRect(impl_->hwnd, &client);
-    const int width = std::max(1, static_cast<int>(client.right - client.left));
-    const int height = std::max(1, static_cast<int>(client.bottom - client.top));
-    if (width != impl_->width || height != impl_->height) {
-        impl_->width = width;
-        impl_->height = height;
+    impl_->width = std::max(1, static_cast<int>(client.right - client.left));
+    impl_->height = std::max(1, static_cast<int>(client.bottom - client.top));
+    impl_->update_effective_scale();
+    if (impl_->ensure_supersample() && impl_->supersample_fbo) {
+        glBindFramebuffer(GL_FRAMEBUFFER, impl_->supersample_fbo);
+        glViewport(0, 0, impl_->supersample_width, impl_->supersample_height);
+    } else {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, impl_->width, impl_->height);
     }
-    glViewport(0, 0, impl_->width, impl_->height);
 }
 
 void Win32Display::swap() {
@@ -700,6 +825,15 @@ void Win32Display::swap() {
         return;
     }
     glFinish();
+    if (impl_->supersample_fbo) {
+        // Downsample the whole frame in one linear blit. The 2D canvas and the
+        // 3D pass share this target, so their edges filter the same way.
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, impl_->supersample_fbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        glBlitFramebuffer(0, 0, impl_->supersample_width, impl_->supersample_height, 0, 0,
+                          impl_->width, impl_->height, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
     if (impl_->frames > 0 && impl_->frame + 1 >= impl_->frames && !impl_->output_path.empty()) {
         std::vector<std::uint8_t> pixels(static_cast<std::size_t>(impl_->width) * impl_->height * 4);
         glReadBuffer(GL_BACK);

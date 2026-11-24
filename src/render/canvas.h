@@ -71,6 +71,11 @@ public:
         }
     }
 
+    // Layout pixels to surface pixels for the current frame. A backend that
+    // renders at a supersampled resolution reports that factor so a raw-GL
+    // compositor can size its surface-space rects and offscreen target.
+    virtual float pixel_scale() const { return 1.0f; }
+
     // Makes every drawing call issued so far visible without ending the frame.
     // A renderer that draws with raw GL between 2D calls can flush here, so the
     // 3D pass lands over the background and later 2D drawing lands over it.
