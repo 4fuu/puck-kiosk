@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Render the Puck Kiosk Windows icon from the fetched 2D Puck sprite.
+
+The icon is a rounded square in the app's stage background colour with the
+Puck sprite drawn large inside it, his body filling the tile edge to edge.
+
+The sprite and the rendered icon are Amp art, so neither is committed: the
+sprite lives in the gitignored assets/cache and the icon in the gitignored
+.cache directory. Only this script is tracked.
+
+Requires ImageMagick (magick or convert) and the sprite from
+`tools/fetch-assets`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+TILE = 1024
+CORNER_RADIUS = 184  # 18% of the tile side
+BACKGROUND = "#0b0d0b"  # app stage background
+SPRITE_CROP = "440x520+30+10"  # Puck's body; the legs are cropped by the tile
+ICON_SIZES = "256,128,64,48,32,16"
+
+
+def find_magick() -> str:
+    for name in ("magick", "convert"):
+        program = shutil.which(name)
+        if program:
+            return program
+    raise SystemExit("ImageMagick is required (magick or convert)")
+
+
+def find_sprite(root: Path, explicit: Path | None) -> Path:
+    if explicit is not None:
+        if not explicit.is_file():
+            raise SystemExit(f"sprite not found: {explicit}")
+        return explicit
+    sprites = sorted((root / "assets" / "cache" / "avatars").glob("classic-*.png"))
+    if not sprites:
+        raise SystemExit("no fetched sprite: run tools/fetch-assets first")
+    return sprites[0]
+
+
+def main() -> int:
+    root = Path(__file__).resolve().parent.parent
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--sprite",
+        type=Path,
+        help="2D sprite PNG (default: assets/cache/avatars/classic-*.png)",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=root / ".cache" / "win32" / "puck-kiosk.ico",
+        help="output .ico (default: .cache/win32/puck-kiosk.ico)",
+    )
+    parser.add_argument("--preview", type=Path, help="also write a 256x256 PNG preview")
+    args = parser.parse_args()
+
+    sprite = find_sprite(root, args.sprite)
+    magick = find_magick()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+
+    subprocess.run(
+        [
+            magick,
+            "-size",
+            f"{TILE}x{TILE}",
+            "xc:none",
+            "-fill",
+            BACKGROUND,
+            "-draw",
+            f"roundrectangle 0,0 {TILE - 1},{TILE - 1} {CORNER_RADIUS},{CORNER_RADIUS}",
+            "(",
+            str(sprite),
+            "-crop",
+            SPRITE_CROP,
+            "+repage",
+            # Mirror the sprite so Puck faces left.
+            "-flop",
+            "-resize",
+            f"{TILE}x{TILE}^",
+            "-gravity",
+            "center",
+            "-extent",
+            f"{TILE}x{TILE}",
+            ")",
+            "-gravity",
+            "center",
+            "-composite",
+            "-define",
+            f"icon:auto-resize={ICON_SIZES}",
+            str(args.output),
+        ],
+        check=True,
+    )
+
+    if args.preview is not None:
+        args.preview.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [magick, f"{args.output}[0]", "-resize", "256x256", str(args.preview)],
+            check=True,
+        )
+
+    print(args.output)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

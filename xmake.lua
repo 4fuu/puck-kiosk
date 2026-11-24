@@ -5,6 +5,10 @@ set_encodings("utf-8")
 
 add_rules("mode.debug", "mode.release")
 
+-- Enables the xpack(...) scope used by the Windows installer at the bottom of
+-- this file.
+includes("@builtin/xpack")
+
 option("backend")
     set_default("headless")
     set_values("headless", "drm", "wayland", "x11", "win32")
@@ -24,6 +28,22 @@ end
 
 local puck3d = get_config("puck3d")
 if puck3d == nil then puck3d = true end
+
+-- Windows executable icon, generated at build time from the fetched 2D Puck
+-- sprite by tools/installer/icon.lua. The sprite (assets/cache) and the
+-- generated icon (.cache) are gitignored, so no Amp art is committed. Without
+-- them the target is built without an icon resource and the build succeeds.
+rule("puck-kiosk.win32.icon")
+    on_load(function (target)
+        local icon = import("tools.installer.icon", {rootdir = os.projectdir()})()
+        if icon then
+            target:add("files", icon.rcfile)
+        end
+    end)
+    before_build(function (target)
+        import("tools.installer.icon", {rootdir = os.projectdir()})()
+    end)
+rule_end()
 
 if win32 then
     -- The mingw cross build and the native MSVC build share this list.
@@ -99,6 +119,7 @@ target("puck-kiosk")
             add_ldflags("-static", "-static-libgcc", "-static-libstdc++")
             add_cxflags("-Wno-cast-function-type")
         end
+        add_rules("puck-kiosk.win32.icon")
     else
         remove_files("src/platform/win32/**.cpp")
         if backend == "drm" then
@@ -208,3 +229,29 @@ target("voice-tests")
     end
     add_links("m", "pthread")
     set_warnings("all", "extra")
+
+-- Windows installer: a per-user NSIS setup that installs puck-kiosk.exe into
+-- %LOCALAPPDATA%\Programs\puck-kiosk, adds Start Menu and optional desktop
+-- shortcuts, and registers an uninstaller. Build the win32 target first:
+--
+--   xmake f -y -p mingw -a x64 -m release --backend=win32
+--   xmake pack -f nsis
+--
+-- xmake's built-in nsis plugin refuses to run on a non-Windows host, so
+-- tools/installer/package.lua resolves tools/installer/puck-kiosk.nsi and
+-- invokes makensis itself. That keeps `xmake pack -f nsis` working from the
+-- Linux mingw cross build and on Windows with the same template.
+
+xpack("puck-kiosk")
+    set_formats("nsis")
+    set_title("Puck Kiosk")
+    set_description("Native Puck car-mode client")
+    set_company("puck-kiosk contributors")
+    set_copyright("MIT License")
+    set_homepage("https://github.com/4fuu/puck-kiosk")
+    set_licensefile("LICENSE")
+    set_specfile("tools/installer/puck-kiosk.nsi")
+    add_targets("puck-kiosk")
+    on_package(function (package)
+        import("tools.installer.package", {rootdir = os.projectdir()})(package)
+    end)

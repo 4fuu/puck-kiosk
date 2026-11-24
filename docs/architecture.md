@@ -217,6 +217,40 @@ no OS headers.
 5. On a high-DPI panel, pass physical `--width`/`--height`; the layout does not
    rescale automatically.
 
+### Desktop installer
+
+The Windows deliverable is a per-user NSIS installer produced by
+`xmake pack -f nsis` from the win32 target. Packaging lives outside the app:
+
+- `xmake.lua` declares `xpack("puck-kiosk")` with the `nsis` format, binds the
+  `puck-kiosk` target, and supplies title, version, and license.
+- `tools/installer/puck-kiosk.nsi` is the checked-in template.
+  `tools/installer/package.lua` substitutes the `${PACKAGE_*}` spec variables
+  and compiles it with `makensis`.
+- The executable icon is rendered at build time by `tools/make-icon` from the
+  fetched 2D sprite: Puck mirrored to face left on a rounded `#0b0d0b` tile,
+  written to the gitignored `.cache/win32/puck-kiosk.ico`. The
+  `puck-kiosk.win32.icon` rule adds a generated `.rc` that embeds it with
+  `windres`/`rc`, and the same `.ico` is the installer and shortcut icon.
+  Without the fetched sprite the rule adds no resource, logs a note, and the
+  build and installer succeed without an icon. The icon is never committed
+  because it derives from Amp's art.
+- The template is deliberately per-user: `RequestExecutionLevel user`,
+  `$LOCALAPPDATA\Programs\puck-kiosk` as the default directory, and an HKCU
+  uninstall entry. xmake's built-in NSIS template defaults to `Program Files`
+  and elevates through UAC unless launched with `/NOADMIN`, so it cannot be
+  used unchanged. xmake's built-in NSIS plugin also returns immediately on a
+  non-Windows host, so the `on_package` script invokes `makensis` directly;
+  that keeps the command identical on Windows and on the Linux mingw cross
+  build.
+
+The installer contract with the app: both shortcuts start `puck-kiosk.exe` with
+no arguments and with the install directory as the working directory (NSIS
+stores `$OUTDIR` in the shortcut), so a normal launch restores the saved
+session or starts pairing. Nothing else is installed: no Puck art, models,
+textures, or fonts. The uninstaller removes the shortcuts, the executable, the
+icon, and the registry entries, and keeps the user's session and cache data.
+
 ## Puck 2D and 3D
 
 The web client is progressive enhancement: the 2D `<img>` + 2D canvas is always

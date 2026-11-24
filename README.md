@@ -161,6 +161,57 @@ If your organization standardizes on vcpkg, install the matching static ports
 paths above use xmake's own packages and are the supported ones; the vcpkg
 variant has not been exercised in this orb.
 
+### Desktop install
+
+`xmake pack -f nsis` builds the win32 target and produces a per-user Windows
+installer at `build/xpack/puck-kiosk/puck-kiosk-0.1.0.exe`:
+
+```bash
+sudo apt install nsis   # Debian/Ubuntu host; NSIS on Windows
+tools/fetch-assets      # 2D sprite for the app icon (optional, see below)
+xmake f -y -p mingw -a x64 -m release --backend=win32
+xmake pack -f nsis
+```
+
+The installer needs no administrator rights and never prompts for UAC:
+
+- installs `puck-kiosk.exe` into `%LOCALAPPDATA%\Programs\puck-kiosk`. The
+  directory page lets the user pick another folder they can write to.
+- adds `Start Menu > Puck Kiosk > Puck Kiosk`, plus a desktop shortcut when the
+  optional component is left selected (it is on by default).
+- registers an uninstaller in Settings > Apps and in the Start Menu folder.
+- installs the executable, `LICENSE.txt`, and the icon. Puck models, textures,
+  and fonts are not installed; the client fetches or is supplied them at
+  runtime, as described under [Assets and licensing](#assets-and-licensing).
+
+Both shortcuts start `puck-kiosk.exe` with no arguments and with the install
+directory as the working directory, so a normal launch restores the saved
+session or starts pairing. The flags from `--help` remain available for
+diagnostics, for example
+`puck-kiosk.exe --platform win32 --frames 1 --out frame.ppm`. Uninstalling
+removes the shortcuts, the executable, the icon, and the registry entries; it
+leaves the user's session and cache data in place.
+
+The app and installer icon is rendered by `tools/make-icon` from the fetched 2D
+Puck sprite (mirrored to face left, on a rounded `#0b0d0b` tile) into the
+gitignored `.cache/win32/puck-kiosk.ico`, then compiled into the executable with
+`windres`/`rc` and used by the installer and shortcuts. Because it derives from
+Amp's art, the icon is not committed: run `tools/fetch-assets` before the build
+to get it. Without the sprite the build still succeeds, logs a note, and
+produces an executable and installer without an icon.
+
+Packaging is configured by the `xpack("puck-kiosk")` block in `xmake.lua` and
+the checked-in template `tools/installer/puck-kiosk.nsi`; `tools/installer/package.lua`
+resolves the `${PACKAGE_*}` variables and runs `makensis`. The template is
+per-user by construction (`RequestExecutionLevel user`, `$LOCALAPPDATA` default,
+HKCU registry) because xmake's built-in NSIS template installs into
+`Program Files` and elevates unless it is started with `/NOADMIN`. xmake's
+built-in NSIS plugin also only runs on a Windows host, so invoking `makensis`
+directly keeps `xmake pack -f nsis` working from the Linux cross build and from
+Windows with the same template. `makensis` must be installed and on `PATH` (the
+standard `C:\Program Files (x86)\NSIS` location is also detected), and
+`tools/make-icon` needs ImageMagick.
+
 ### Known limitations
 
 - WASAPI capture/render is implemented against the `AudioIO` seam, but no real
