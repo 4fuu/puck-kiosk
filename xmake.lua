@@ -82,7 +82,7 @@ target("puck-kiosk")
                      "libopus", "ixwebsocket", "libdatachannel")
         add_includedirs("third_party/gl-headers")
         add_links("opengl32", "gdi32", "user32", "ole32", "winmm", "uuid", "ws2_32", "crypt32",
-                  "iphlpapi", "bcrypt", "secur32", "advapi32", "wldap32", "mmdevapi")
+                  "iphlpapi", "bcrypt", "secur32", "advapi32", "wldap32", "mmdevapi", "dwmapi")
         if is_plat("mingw") then
             add_syslinks("winpthread")
         end

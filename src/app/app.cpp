@@ -1040,8 +1040,10 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         // Headless has no input and writes a PPM per frame, so only re-render
         // while the debug panel is open there.
         const bool headless = std::string(platform.display->backend_name()) == "headless";
+        const bool desktop = std::string(platform.display->backend_name()) == "win32";
         if (dirty || (diagnostics.is_open() && !headless &&
-                      Clock::now() - last_render >= std::chrono::milliseconds(100))) {
+                      Clock::now() - last_render >= std::chrono::milliseconds(100)) ||
+            (desktop && Clock::now() - last_render >= std::chrono::milliseconds(16))) {
             sync_pairing();
             render(true);
             last_render = Clock::now();
@@ -1606,10 +1608,12 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         }
 
         const bool headless = std::string(platform.display->backend_name()) == "headless";
-        const auto interval = call && call->active()
-                                  ? std::chrono::milliseconds(100)
-                                  : (headless ? std::chrono::milliseconds(0)
-                                              : std::chrono::milliseconds(100));
+        // Desktop GPUs animate at 60 fps; embedded panels keep the 10 fps
+        // idle cadence to save power and CPU.
+        const bool desktop = std::string(platform.display->backend_name()) == "win32";
+        const auto interval = headless ? std::chrono::milliseconds(0)
+                                       : (desktop ? std::chrono::milliseconds(16)
+                                                  : std::chrono::milliseconds(100));
         if (car_dirty || (interval.count() > 0 && Clock::now() - last_car_render >= interval)) {
             sync_car();
             render(true);

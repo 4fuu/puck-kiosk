@@ -18,6 +18,7 @@
 #endif
 #include <windows.h>
 #include <windowsx.h>
+#include <dwmapi.h>
 #include <GL/gl.h>
 #include <GL/wglext.h>
 
@@ -298,6 +299,35 @@ struct Win32Display::Impl {
                       static_cast<int>(restore_rect.top));
         }
         log_window_state(maximized ? "maximized" : "restored");
+        apply_corner_style();
+    }
+
+    // Win11 DWM rounds borderless windows with antialiased corners. Older
+    // Windows rejects the attribute, so fall back to a round-rect region.
+    // Maximized and fullscreen windows stay square.
+    void apply_corner_style() {
+        if (!hwnd || !visible) {
+            return;
+        }
+        const bool square = fullscreen || maximized;
+        constexpr DWORD kDwmWindowCornerPreference = 33;
+        DWORD preference = square ? 1 : 2;  // DWMWCP_DONOTROUND / DWMWCP_ROUND
+        const HRESULT hr =
+            DwmSetWindowAttribute(hwnd, kDwmWindowCornerPreference, &preference, sizeof(preference));
+        if (SUCCEEDED(hr)) {
+            SetWindowRgn(hwnd, nullptr, TRUE);
+            log::info("win32: corners %s (dwm)", square ? "square" : "round");
+            return;
+        }
+        if (square) {
+            SetWindowRgn(hwnd, nullptr, TRUE);
+            return;
+        }
+        RECT rect = {};
+        GetClientRect(hwnd, &rect);
+        const HRGN region = CreateRoundRectRgn(0, 0, rect.right + 1, rect.bottom + 1, 9, 9);
+        SetWindowRgn(hwnd, region, TRUE);
+        log::info("win32: corners round (region fallback)");
     }
 
     void handle_mouse(UINT message, LPARAM lparam) {
@@ -613,6 +643,7 @@ bool Win32Display::initialize(std::string* error) {
         }
         SetForegroundWindow(impl_->hwnd);
         SetFocus(impl_->hwnd);
+        impl_->apply_corner_style();
     }
 
     UINT dpi = 96;
