@@ -7,7 +7,7 @@ board or OS.
 ## Goals and constraints
 
 - Embedded Linux first, desktop second.
-- OpenGL ES 3.0 for the 3D Puck; 2D fallback everywhere.
+- OpenGL ES 3.0 (or desktop OpenGL 3.3) for the 3D Puck; 2D fallback everywhere.
 - 512 MB RAM target; no browser engine.
 - Reuse Amp's existing pairing/auth flow; do not modify the phone-side site.
 - Keep display, input, audio, HTTP/WebSocket, and secret storage replaceable.
@@ -29,7 +29,7 @@ main.cpp
        │    └─ Canvas         NanoVG GLES3 (Linux) / NanoVG GL3 (Windows)
        ├─ PuckView
        │    ├─ Puck2D         sprite + face curves
-       │    └─ Puck3D         PUCK v2 + GLES 3.0 (M1)
+       │    └─ Puck3D         PUCK v2 + GLES 3.0 / GL 3.3
        └─ CarUi               pairing / car / call / media screens
 ```
 
@@ -44,7 +44,7 @@ main.cpp
 | `WebSocketFactory` | actor socket | none | IXWebSocket/libwebsockets | same, OpenSSL 3 on Windows |
 | `SecureStore` | cookie/token at rest | none | encrypted file / TPM | file store |
 | `Canvas` | 2D drawing + text | NanoVG GLES3 | NanoVG or LVGL | NanoVG GL3 on Windows; NanoVG or Skia elsewhere |
-| `PuckView` | Puck drawing | `Puck2D` | `Puck2D`/`Puck3D` | same; `Puck3D` is GLES-only and not built for Win32 |
+| `PuckView` | Puck drawing | `Puck2D` | `Puck2D`/`Puck3D` | same; `Puck3D` targets GLES 3.0 and desktop GL 3.3 |
 
 Only `create_platform()` and the backend translation units change when a new
 board is added. `App`, `CarUi`, `Renderer`, and `PuckView` must not include OS
@@ -151,7 +151,9 @@ no OS headers.
   `src/platform/win32/gl_loader.cpp` resolves the 3.3 entry points with
   `wglGetProcAddress`; NanoVG's GL3 implementation is the unmodified vendored
   `nanovg_gl.h` with those calls mapped onto the loader table. The `Canvas`
-  API does not change.
+  API does not change. Puck3D uses the same table through
+  `src/platform/win32/gl3_api.h`, which maps only the GL 3.x calls that
+  `opengl32.dll` does not export; the OpenGL 1.1 calls stay direct.
 - `WasapiAudioIO` opens the default capture and render endpoints in shared mode
   with `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM` (48 kHz mono 16-bit PCM by
   default). WASAPI event threads move samples through bounded ring buffers;
@@ -166,8 +168,13 @@ no OS headers.
   OpenSSL 3, Opus, libpng/libjpeg/libwebp, and libqrencode. The local packages
   in `third_party/xmake-repo/` only override the mingw install rules for
   libdatachannel and IXWebSocket; see that directory's README.
-- `Puck3D` is not compiled for this backend (`PUCK_KIOSK_ENABLE_3D` is not
-  defined), so `create_puck_view()` returns `Puck2D`.
+- `Puck3D` is built for this backend. One source serves both GL flavors: with
+  `PUCK_KIOSK_GL_DESKTOP` it includes the desktop GL headers and the loader
+  seam, compiles `#version 330 core` shaders without the ES precision
+  qualifiers, checks for OpenGL 3.3 instead of GLES 3.0, and uses
+  `glClearDepth` instead of the ES-only `glClearDepthf`. The shader bodies and
+  the renderer logic are shared. Any initialization failure still makes
+  `create_puck_view()` return `Puck2D`.
 
 ### Build and verify
 
@@ -210,10 +217,10 @@ swaps in the real sprite and face curves.
 - `Puck2D` uses a 498×602 sprite plus the face curve data. For custom avatars,
   the 3D asset manifest's `image-<hash>.webp` is the sprite and the matching
   `puck-<hash>.json` provides `eyes`, `mouth`, `body`, and `limbs`.
-- `Puck3D` parses the PUCK v2 mesh container and runs the part, eye, and
-  spotlight GLES shaders. The body, mouth, nose, and legs are re-posed from the
-  rig on a worker thread; arms keep their authored scene-space geometry and use
-  the 498×602 image texture as props.
+- `Puck3D` parses the PUCK v2 mesh container and runs the part, eye, spotlight,
+  and composite shaders on GLES 3.0 or desktop GL 3.3. The body, mouth, nose,
+  and legs are re-posed from the rig on a worker thread; arms keep their
+  authored scene-space geometry and use the 498×602 image texture as props.
 - `create_puck_view()` tries 3D first when enabled, and returns 2D if
   initialization fails. The app never fails because 3D is unavailable.
 

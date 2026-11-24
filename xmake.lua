@@ -23,12 +23,7 @@ if win32 and not is_plat("windows", "mingw") then
 end
 
 local puck3d = get_config("puck3d")
-if puck3d == nil then puck3d = not win32 end
-if win32 then
-    -- Puck3D is a GLES 3.0 renderer. The Windows backend uses desktop GL 3.3
-    -- for the 2D canvas, so the 3D pass stays disabled until it is ported.
-    puck3d = false
-end
+if puck3d == nil then puck3d = true end
 
 if win32 then
     -- The mingw cross build and the native MSVC build share this list.
@@ -83,7 +78,6 @@ target("puck-kiosk")
         remove_files("src/platform/drm/**.cpp")
         remove_files("src/platform/headless/**.cpp")
         remove_files("src/platform/audio_alsa.cpp")
-        remove_files("src/puck/puck_3d*.cpp")
         add_packages("libcurl", "libwebp", "libpng", "libjpeg", "libqrencode",
                      "libopus", "ixwebsocket", "libdatachannel")
         add_includedirs("third_party/gl-headers")
@@ -94,6 +88,9 @@ target("puck-kiosk")
         end
         add_defines("PUCK_KIOSK_BACKEND_WIN32=1")
         add_defines("PUCK_KIOSK_CANVAS_NANOVG_GL3=1")
+        -- Puck3D shares one source with the GLES build and selects desktop GL
+        -- 3.3 headers, GLSL, and entry-point loading through this define.
+        add_defines("PUCK_KIOSK_GL_DESKTOP=1")
         add_defines("SCTP_STDINT_INCLUDE=<stdint.h>")
         if is_plat("mingw") then
             -- mingw's printf otherwise rejects the C99 %zu used by the logger.

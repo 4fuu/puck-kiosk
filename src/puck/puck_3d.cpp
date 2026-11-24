@@ -5,7 +5,11 @@
 #include "puck/puck_rig.h"
 #include "puck/puck_v2.h"
 
+#if defined(PUCK_KIOSK_GL_DESKTOP)
+#include "platform/win32/gl3_api.h"
+#else
 #include <GLES3/gl3.h>
+#endif
 #include <webp/decode.h>
 
 #include <algorithm>
@@ -40,9 +44,15 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr float kPuckEyeX = 277.3f / 498.0f;
 constexpr float kPuckEyeY = 184.05f / 602.0f;
 
-constexpr const char* kPartVertexShader = R"(#version 300 es
-precision highp float;
+#if defined(PUCK_KIOSK_GL_DESKTOP)
+// Desktop GL 3.3 core rejects the ES precision qualifiers, so only the shader
+// header differs between the two builds; the bodies below are shared.
+#define PK_GLSL_HEADER "#version 330 core\n"
+#else
+#define PK_GLSL_HEADER "#version 300 es\nprecision highp float;\n"
+#endif
 
+constexpr const char* kPartVertexShader = PK_GLSL_HEADER R"(
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec4 aTangent;
@@ -90,8 +100,7 @@ void main() {
 }
 )";
 
-constexpr const char* kPartFragmentShader = R"(#version 300 es
-precision highp float;
+constexpr const char* kPartFragmentShader = PK_GLSL_HEADER R"(
 
 uniform sampler2D uAlbedo;
 uniform sampler2D uNormalMap;
@@ -150,8 +159,7 @@ void main() {
 }
 )";
 
-constexpr const char* kEyeVertexShader = R"(#version 300 es
-precision highp float;
+constexpr const char* kEyeVertexShader = PK_GLSL_HEADER R"(
 
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aNormal;
@@ -170,8 +178,7 @@ void main() {
 }
 )";
 
-constexpr const char* kEyeFragmentShader = R"(#version 300 es
-precision highp float;
+constexpr const char* kEyeFragmentShader = PK_GLSL_HEADER R"(
 
 uniform vec3 uLight;
 uniform vec3 uSclera;
@@ -203,8 +210,7 @@ void main() {
 }
 )";
 
-constexpr const char* kSpotlightVertexShader = R"(#version 300 es
-precision highp float;
+constexpr const char* kSpotlightVertexShader = PK_GLSL_HEADER R"(
 
 uniform mat4 uProjection;
 uniform vec3 uCenter;
@@ -220,8 +226,7 @@ void main() {
 }
 )";
 
-constexpr const char* kSpotlightFragmentShader = R"(#version 300 es
-precision highp float;
+constexpr const char* kSpotlightFragmentShader = PK_GLSL_HEADER R"(
 
 uniform vec2 uHalfSize;
 uniform vec3 uPool;
@@ -251,8 +256,7 @@ void main() {
 }
 )";
 
-constexpr const char* kCompositeVertexShader = R"(#version 300 es
-precision highp float;
+constexpr const char* kCompositeVertexShader = PK_GLSL_HEADER R"(
 
 out vec2 vUV;
 
@@ -263,8 +267,7 @@ void main() {
 }
 )";
 
-constexpr const char* kCompositeFragmentShader = R"(#version 300 es
-precision highp float;
+constexpr const char* kCompositeFragmentShader = PK_GLSL_HEADER R"(
 
 uniform sampler2D uScene;
 uniform float uSaturation;
@@ -280,6 +283,8 @@ void main() {
     outColor = vec4(rgb, scene.a);
 }
 )";
+
+#undef PK_GLSL_HEADER
 
 struct Vec3 {
     float x = 0.0f;
@@ -363,14 +368,15 @@ Mat4 rotate_z(float angle) {
     return result;
 }
 
-Mat4 orthographic(float left, float right, float bottom, float top, float near, float far) {
+Mat4 orthographic(float left, float right, float bottom, float top, float near_plane,
+                  float far_plane) {
     Mat4 result;
     result.m[0] = 2.0f / (right - left);
     result.m[5] = 2.0f / (top - bottom);
-    result.m[10] = -2.0f / (far - near);
+    result.m[10] = -2.0f / (far_plane - near_plane);
     result.m[12] = -(right + left) / (right - left);
     result.m[13] = -(top + bottom) / (top - bottom);
-    result.m[14] = -(far + near) / (far - near);
+    result.m[14] = -(far_plane + near_plane) / (far_plane - near_plane);
     return result;
 }
 
@@ -1041,12 +1047,22 @@ bool Puck3D::Impl::initialize(std::string* error) {
 
     const GLubyte* version = glGetString(GL_VERSION);
     if (!version) {
-        return fail("no current GLES context");
+        return fail("no current GL context");
     }
     const char* version_text = reinterpret_cast<const char*>(version);
+#if defined(PUCK_KIOSK_GL_DESKTOP)
+    GLint major = 0;
+    GLint minor = 0;
+    glGetIntegerv(GL_MAJOR_VERSION, &major);
+    glGetIntegerv(GL_MINOR_VERSION, &minor);
+    if (major < 3 || (major == 3 && minor < 3)) {
+        return fail(std::string("OpenGL 3.3 is required (found ") + version_text + ")");
+    }
+#else
     if (!std::strstr(version_text, "OpenGL ES 3")) {
         return fail(std::string("GLES 3.0 is required (found ") + version_text + ")");
     }
+#endif
     while (glGetError() != GL_NO_ERROR) {
     }
 
@@ -1243,6 +1259,14 @@ void update_animation(Animation* animation, const PuckVisual& visual, float time
     }
 }
 
+void clear_depth(float depth) {
+#if defined(PUCK_KIOSK_GL_DESKTOP)
+    glClearDepth(static_cast<double>(depth));
+#else
+    glClearDepthf(depth);
+#endif
+}
+
 void draw_mesh(const GlMesh& mesh) {
     if (mesh.count <= 0) {
         return;
@@ -1323,7 +1347,7 @@ void Puck3D::Impl::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual,
     glDisable(GL_STENCIL_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-    glClearDepthf(1.0f);
+    clear_depth(1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LESS);

@@ -6,8 +6,9 @@
 
 namespace pk {
 
-// The optional GLES 3.0 PUCK v2 renderer. initialize() loads and uploads the
-// classic avatar, and any failure makes create_puck_view() fall back to Puck2D.
+// The optional GLES 3.0 / desktop GL 3.3 PUCK v2 renderer. initialize() loads
+// and uploads the classic avatar, and any failure makes create_puck_view() fall
+// back to Puck2D.
 class Puck3D final : public PuckView {
 public:
     Puck3D();
