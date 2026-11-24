@@ -80,6 +80,10 @@ function main(package)
     specvars.PACKAGE_ICONFILE = iconfile
     specvars.PACKAGE_LICENSEFILE = path.absolute(package:get("licensefile"))
     specvars.PACKAGE_MANIFESTFILE = path.absolute(path.join(os.projectdir(), "assets", "manifest.json"))
+    -- Bundled art is optional: pack whatever tools/fetch-assets has cached so
+    -- an installed copy needs no first-run download. The repo never commits it.
+    local cachedir = path.join(os.projectdir(), "assets", "cache")
+    specvars.PACKAGE_ASSETSDIR = os.isdir(cachedir) and path.absolute(cachedir) or ""
 
     os.mkdir(package:builddir())
     os.mkdir(package:outputdir())

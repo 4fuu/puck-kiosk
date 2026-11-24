@@ -112,6 +112,12 @@ Section "${APP_NAME}" SecApp
     ; first run into assets/cache under the install directory.
     SetOutPath "$INSTDIR\assets"
     File "/oname=manifest.json" "${PACKAGE_MANIFESTFILE}"
+!if "${PACKAGE_ASSETSDIR}" != ""
+    ; Fetched art present at pack time ships with the installer so the first
+    ; launch needs no download; the in-app fetcher remains the fallback.
+    SetOutPath "$INSTDIR\assets\cache"
+    File /r "${PACKAGE_ASSETSDIR}\*.*"
+!endif
     SetOutPath "$INSTDIR"
 
     WriteUninstaller "$INSTDIR\uninstall.exe"

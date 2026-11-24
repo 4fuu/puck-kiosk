@@ -524,10 +524,12 @@ Packaging lives outside the app:
   removes the shortcuts, the executable, the icon, the manifest, the
   re-downloadable `assets/cache`, and the registry entries, and keeps the
   session in `%LOCALAPPDATA%\puck-kiosk`.
-- The installer ships the executable, `LICENSE.txt`, the icon, and
-  `assets/manifest.json`; the art is fetched on first run into `assets/cache`
-  under the install directory, and the session is written to
-  `%LOCALAPPDATA%\puck-kiosk`.
+- The installer ships the executable, `LICENSE.txt`, the icon,
+  `assets/manifest.json`, and any art cached at pack time; without bundled
+  art the client fetches it on first run into `assets/cache` under the
+  install directory, and the session is written to
+  `%LOCALAPPDATA%\puck-kiosk`. Cached files are verified locally by size and
+  SHA-256 on later launches, so a valid cache causes no asset request.
 
 The installer is unsigned.
 

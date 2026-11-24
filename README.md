@@ -297,8 +297,9 @@ license: NanoVG (MIT), Material Symbols (Apache-2.0), the Khronos GL headers
 - The mingw build links libqrencode (LGPL-2.1) statically. A permissively
   licensed encoder is required before redistribution.
 - The NSIS installer ships the executable, license, icon, and
-  `assets/manifest.json` (URL/hash metadata only). The art itself is fetched
-  on first run into `assets/cache` under the install directory. Uninstall
+  `assets/manifest.json`, plus whatever art `tools/fetch-assets` has cached
+  at pack time, so a bundled install needs no first-run download. Without
+  bundled art the client fetches it on first run into `assets/cache`. Uninstall
   deletes that cache; the session in `%LOCALAPPDATA%\puck-kiosk` stays.
 - There is no IME or text-entry field, no platform authenticator (the passkey
   button re-authorizes the actor connection), and no kiosk lock: Escape closes
