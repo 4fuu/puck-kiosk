@@ -31,7 +31,8 @@ std::unique_ptr<Platform> create_platform(const PlatformOptions& options, std::s
     if (options.backend == "headless" || options.backend == "win32") {
         const bool visible = options.backend == "win32";
         auto display = std::make_unique<Win32Display>(options.width, options.height,
-                                                      options.output_path, options.frames, visible);
+                                                      options.output_path, options.frames, visible,
+                                                      visible && options.fullscreen);
         platform->input = std::make_unique<Win32CombinedInput>(*display);
         platform->display = std::move(display);
     } else

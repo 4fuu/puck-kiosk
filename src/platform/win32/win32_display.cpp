@@ -64,6 +64,7 @@ struct Win32Display::Impl {
     int frames = 1;
     int frame = 0;
     bool visible = true;
+    bool fullscreen = false;
     bool quit = false;
     bool pointer_api = false;
     std::string output_path;
@@ -271,12 +272,14 @@ struct Win32Display::Impl {
     }
 };
 
-Win32Display::Win32Display(int width, int height, std::string output_path, int frames, bool visible)
+Win32Display::Win32Display(int width, int height, std::string output_path, int frames, bool visible,
+                           bool fullscreen)
     : impl_(std::make_unique<Impl>()) {
     impl_->width = width > 0 ? width : 1280;
     impl_->height = height > 0 ? height : 720;
     impl_->frames = frames < 0 ? 0 : frames;
     impl_->visible = visible;
+    impl_->fullscreen = fullscreen;
     impl_->output_path = std::move(output_path);
 }
 
@@ -309,14 +312,41 @@ bool Win32Display::initialize(std::string* error) {
         return set_error(error, "RegisterClassExW failed: " + hresult_text(HRESULT_FROM_WIN32(GetLastError())));
     }
 
-    const DWORD style = WS_OVERLAPPEDWINDOW;
-    RECT rect = {0, 0, impl_->width, impl_->height};
-    AdjustWindowRectEx(&rect, style, FALSE, 0);
-    const int window_width = rect.right - rect.left;
-    const int window_height = rect.bottom - rect.top;
-    impl_->hwnd = CreateWindowExW(0, kWindowClass, L"Puck Kiosk", style, CW_USEDEFAULT,
-                                  CW_USEDEFAULT, window_width, window_height, nullptr, nullptr,
-                                  instance, impl_.get());
+    const DWORD style = impl_->fullscreen ? WS_POPUP : WS_OVERLAPPEDWINDOW;
+    int window_width = impl_->width;
+    int window_height = impl_->height;
+    int window_x = CW_USEDEFAULT;
+    int window_y = CW_USEDEFAULT;
+    bool cover_taskbar = false;
+    if (!impl_->fullscreen) {
+        RECT rect = {0, 0, impl_->width, impl_->height};
+        AdjustWindowRectEx(&rect, style, FALSE, 0);
+        window_width = rect.right - rect.left;
+        window_height = rect.bottom - rect.top;
+    } else {
+        // Borderless popup: the window is the client area, centered in the
+        // primary monitor's work area. At the monitor's native size it also
+        // covers the taskbar, so raise it above the shell.
+        POINT origin = {0, 0};
+        MONITORINFO monitor_info = {};
+        monitor_info.cbSize = sizeof(monitor_info);
+        const HMONITOR monitor = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+        if (GetMonitorInfoW(monitor, &monitor_info)) {
+            const int work_width = monitor_info.rcWork.right - monitor_info.rcWork.left;
+            const int work_height = monitor_info.rcWork.bottom - monitor_info.rcWork.top;
+            window_x = monitor_info.rcWork.left + std::max(0, (work_width - impl_->width) / 2);
+            window_y = monitor_info.rcWork.top + std::max(0, (work_height - impl_->height) / 2);
+            cover_taskbar =
+                impl_->width >= (monitor_info.rcMonitor.right - monitor_info.rcMonitor.left) &&
+                impl_->height >= (monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top);
+        } else {
+            window_x = 0;
+            window_y = 0;
+        }
+    }
+    impl_->hwnd = CreateWindowExW(0, kWindowClass, L"Puck Kiosk", style, window_x, window_y,
+                                  window_width, window_height, nullptr, nullptr, instance,
+                                  impl_.get());
     if (!impl_->hwnd) {
         return set_error(error, "CreateWindowExW failed: " +
                                     hresult_text(HRESULT_FROM_WIN32(GetLastError())));
@@ -408,7 +438,12 @@ bool Win32Display::initialize(std::string* error) {
     if (impl_->visible) {
         ShowWindow(impl_->hwnd, SW_SHOW);
         UpdateWindow(impl_->hwnd);
+        if (impl_->fullscreen && cover_taskbar) {
+            SetWindowPos(impl_->hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        }
         SetForegroundWindow(impl_->hwnd);
+        SetFocus(impl_->hwnd);
     }
 
     UINT dpi = 96;
@@ -418,10 +453,18 @@ bool Win32Display::initialize(std::string* error) {
             dpi = get_dpi(impl_->hwnd);
         }
     }
-    log::info("win32: WGL %s, GL %s, renderer %s, dpi %u%s", impl_->visible ? "window" : "hidden",
+    const char* mode =
+        !impl_->visible ? "hidden" : (impl_->fullscreen ? "fullscreen" : "window");
+    log::info("win32: WGL %s, GL %s, renderer %s, dpi %u%s", mode,
               reinterpret_cast<const char*>(glGetString(GL_VERSION)),
               reinterpret_cast<const char*>(glGetString(GL_RENDERER)), dpi,
               dpi == 96 ? "" : " (layout is pixel-based; size the window with --width/--height)");
+    RECT outer = {};
+    GetWindowRect(impl_->hwnd, &outer);
+    log::info("win32: client %dx%d, window %dx%d (%s)", impl_->width, impl_->height,
+              static_cast<int>(outer.right - outer.left),
+              static_cast<int>(outer.bottom - outer.top),
+              impl_->fullscreen ? "fullscreen" : "windowed");
     return true;
 }
 

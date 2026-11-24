@@ -110,6 +110,11 @@ flow needs network access:
 wine build/mingw/x64/release/puck-kiosk.exe --pair --frames 0
 ```
 
+`--fullscreen` creates a borderless popup whose client area is exactly
+`--width` x `--height`, centered in the primary monitor's work area. At the
+monitor's native size it also covers the taskbar. Windowed mode remains the
+default.
+
 The UI font comes from `%WINDIR%\Fonts` (Segoe UI, then Arial) unless `--font`
 is given. On a high-DPI display the process is per-monitor DPI aware, but the
 layout is pixel-based; pass `--width` and `--height` that match the panel.
@@ -160,8 +165,12 @@ variant has not been exercised in this orb.
   on systems without the pointer API, `WM_MOUSE*` for the mouse, and
   `WM_KEYDOWN`/`WM_CHAR`. There is no IME or text-entry field yet, and no
   gamepad support (XInput will be wired later).
-- The window is a normal resizable window. There is no borderless fullscreen
-  or kiosk-lock mode yet; Escape quits.
+- The window is a normal resizable window by default. `--fullscreen` uses a
+  borderless popup with an exact client size; Escape still quits and F12 still
+  toggles Debug. There is no kiosk lock.
+- Windowed mode caps a 1920x1080 client at 1920x1061 on a 1920x1080 monitor
+  because of the frame and maximum tracking size. Use `--fullscreen` for an
+  exact 1920x1080 client.
 - `libqrencode` is LGPL-2.1. The mingw build links it statically into the
   executable, which is fine for local evaluation but needs a DLL (or a
   permissively licensed encoder) before redistribution.
