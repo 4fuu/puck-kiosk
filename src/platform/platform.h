@@ -42,4 +42,14 @@ struct Platform {
 // Add a new backend by extending this factory, not the app or renderer.
 std::unique_ptr<Platform> create_platform(const PlatformOptions& options, std::string* error);
 
+// A client owns one connection handle and cookie jar. Callers on different
+// threads each need their own instance; sharing one serializes every request.
+std::unique_ptr<HttpClient> create_http_client(std::string* error);
+
+// Windows GUI-subsystem builds start without a console. When the process was
+// launched with arguments, attach to the parent's console so log output is
+// visible; a shortcut launch (no arguments) creates no console window.
+// Returns whether the process has a console afterwards. A no-op elsewhere.
+bool attach_process_console(int argc);
+
 }  // namespace pk

@@ -76,8 +76,10 @@ renderers.
 The file-backed `SecureStore` writes each value to its own `0600` file under a
 `0700` directory: `$XDG_CONFIG_HOME/puck-kiosk` or `~/.config/puck-kiosk` when
 those variables are set, and `build/puck-kiosk` relative to the working
-directory otherwise. It stores the cookie jar and the saved car session; it is
-not encrypted at rest.
+directory otherwise. On Windows it uses `%LOCALAPPDATA%\puck-kiosk` (falling
+back to `%USERPROFILE%\AppData\Local\puck-kiosk`), because a shortcut starts the
+app inside the install directory and session data must not live there. It
+stores the cookie jar and the saved car session; it is not encrypted at rest.
 
 ## Startup and frame loop
 
@@ -88,6 +90,12 @@ A normal launch starts two worker threads before the first visible frame:
   session cannot be reused.
 - `AssetFetcher` reads `assets/manifest.json`, verifies every cached file by
   size and SHA-256, and downloads missing files.
+
+Each worker owns its HTTP client: the asset fetcher creates a second
+`CurlHttpClient`, so its downloads run concurrently with session validation
+and remote-hash discovery on the shared session client. Before that split,
+both workers serialized on one client and a first-run QR waited for the
+asset downloads.
 
 The UI thread paints a loading state while those run. When the asset fetch
 finishes, the placeholder `Puck2D` is replaced with `create_puck_view()`, which
@@ -501,12 +509,16 @@ Packaging lives outside the app:
   committed because it derives from Amp's art.
 - Both shortcuts start `puck-kiosk.exe` with no arguments and the install
   directory as the working directory, so a normal launch restores the saved
-  session or starts pairing. The uninstaller removes the shortcuts, the
-  executable, the icon, and the registry entries, and keeps the user's session
-  and cache data.
+  session or starts pairing. The executable is linked for the GUI subsystem,
+  so a shortcut launch opens no console window; a launch with arguments
+  attaches to the calling console so the log stays visible. The uninstaller
+  removes the shortcuts, the executable, the icon, the manifest, the
+  re-downloadable `assets/cache`, and the registry entries, and keeps the
+  session in `%LOCALAPPDATA%\puck-kiosk`.
 - The installer ships the executable, `LICENSE.txt`, the icon, and
   `assets/manifest.json`; the art is fetched on first run into `assets/cache`
-  under the install directory.
+  under the install directory, and the session is written to
+  `%LOCALAPPDATA%\puck-kiosk`.
 
 The installer is unsigned.
 
@@ -531,8 +543,10 @@ assets/cache/avatars/classic-<hash>.png
 ```
 
 The cache is relative to the process working directory. Treat it as
-disposable; the fetcher recreates it from the manifest. The 2D renderer uses
-the PNG sprite when present and the WebP image otherwise.
+disposable; the fetcher recreates it from the manifest. On Windows a shortcut
+starts the app in the install directory, and the uninstaller deletes
+`assets/cache` there. The 2D renderer uses the PNG sprite when present and the
+WebP image otherwise.
 
 Memory budget:
 

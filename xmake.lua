@@ -112,12 +112,20 @@ target("puck-kiosk")
         -- 3.3 headers, GLSL, and entry-point loading through this define.
         add_defines("PUCK_KIOSK_GL_DESKTOP=1")
         add_defines("SCTP_STDINT_INCLUDE=<stdint.h>")
+        -- GUI subsystem: a Start Menu or desktop launch must not open a console
+        -- window beside the app. main() stays the entry point; src/main.cpp
+        -- attaches to the launching console when arguments are passed.
+        add_rules("platform.windows.subsystem")
+        set_values("windows.subsystem", "windows")
         if is_plat("mingw") then
             -- mingw's printf otherwise rejects the C99 %zu used by the logger.
             add_defines("__USE_MINGW_ANSI_STDIO=1")
             -- Keep the .exe self-contained: no libstdc++/libgcc/winpthread DLLs.
             add_ldflags("-static", "-static-libgcc", "-static-libstdc++")
             add_cxflags("-Wno-cast-function-type")
+        elseif is_plat("windows") then
+            -- link.exe infers WinMain from /SUBSYSTEM:WINDOWS; keep main().
+            add_ldflags("/ENTRY:mainCRTStartup")
         end
         add_rules("puck-kiosk.win32.icon")
     else

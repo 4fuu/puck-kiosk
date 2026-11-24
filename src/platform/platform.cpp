@@ -4,7 +4,19 @@
 #include "platform/curl_http.h"
 #include "platform/file_secure_store.h"
 #include "platform/ix_websocket.h"
-#if !defined(PUCK_KIOSK_BACKEND_WIN32)
+#if defined(PUCK_KIOSK_BACKEND_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <cstdio>
+#include "platform/win32/win32_audio.h"
+#include "platform/win32/win32_display.h"
+#include "platform/win32/xinput_input.h"
+#else
 #include "platform/headless/headless_display.h"
 #endif
 #if defined(PUCK_KIOSK_BACKEND_DRM)
@@ -13,13 +25,63 @@
 #include "platform/drm/drm_display.h"
 #include "platform/drm/drm_input.h"
 #endif
-#if defined(PUCK_KIOSK_BACKEND_WIN32)
-#include "platform/win32/win32_audio.h"
-#include "platform/win32/win32_display.h"
-#include "platform/win32/xinput_input.h"
-#endif
 
 namespace pk {
+namespace {
+
+#if defined(PUCK_KIOSK_BACKEND_WIN32)
+// A GUI-subsystem process starts with unset standard handles. Reopening them on
+// the attached console makes the logger work, but a stream the shell redirected
+// to a file or pipe must keep pointing there.
+void reopen_console_stream(DWORD std_handle, const char* name, const char* mode, FILE* stream) {
+    const HANDLE handle = GetStdHandle(std_handle);
+    const DWORD type = handle && handle != INVALID_HANDLE_VALUE ? GetFileType(handle)
+                                                               : FILE_TYPE_UNKNOWN;
+    if (type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE) {
+        return;
+    }
+#if defined(_MSC_VER)
+    FILE* reopened = nullptr;
+    freopen_s(&reopened, name, mode, stream);
+    (void)reopened;
+#else
+    std::freopen(name, mode, stream);
+#endif
+}
+#endif
+
+}  // namespace
+
+std::unique_ptr<HttpClient> create_http_client(std::string* error) {
+    auto http = std::make_unique<CurlHttpClient>();
+    if (!http->valid()) {
+        if (error) {
+            *error = "libcurl initialization failed";
+        }
+        return nullptr;
+    }
+    return http;
+}
+
+bool attach_process_console(int argc) {
+#if defined(PUCK_KIOSK_BACKEND_WIN32)
+    bool attached = false;
+    if (argc > 1) {
+        attached = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
+        if (attached) {
+            reopen_console_stream(STD_OUTPUT_HANDLE, "CONOUT$", "w", stdout);
+            reopen_console_stream(STD_ERROR_HANDLE, "CONOUT$", "w", stderr);
+            reopen_console_stream(STD_INPUT_HANDLE, "CONIN$", "r", stdin);
+        }
+    }
+    // Wine models a shell console without a window, so the attach result is the
+    // reliable signal there; a window is the user-visible result on Windows.
+    return attached || GetConsoleWindow() != nullptr;
+#else
+    (void)argc;
+    return false;
+#endif
+}
 
 std::unique_ptr<Platform> create_platform(const PlatformOptions& options, std::string* error) {
     auto platform = std::make_unique<Platform>();
@@ -80,11 +142,10 @@ std::unique_ptr<Platform> create_platform(const PlatformOptions& options, std::s
         return nullptr;
     }
 
-    auto http = std::make_unique<CurlHttpClient>();
-    if (http->valid()) {
-        platform->http = std::move(http);
-    } else {
-        log::error("libcurl initialization failed; network features are disabled");
+    std::string http_error;
+    platform->http = create_http_client(&http_error);
+    if (!platform->http) {
+        log::error("%s; network features are disabled", http_error.c_str());
     }
     platform->websockets = std::make_unique<IxWebSocketFactory>();
 

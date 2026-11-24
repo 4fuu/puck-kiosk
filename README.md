@@ -143,7 +143,10 @@ installer icon. It needs Python 3 and `curl`; the icon step needs ImageMagick.
 directory. The installer is written under `build\xpack\puck-kiosk\`. It
 installs for the current user without administrator rights into
 `%LOCALAPPDATA%\Programs\puck-kiosk`, adds Start Menu and optional desktop
-shortcuts, and registers an uninstaller in HKCU.
+shortcuts, and registers an uninstaller in HKCU. The app keeps its cookie jar
+and saved car session in `%LOCALAPPDATA%\puck-kiosk`; uninstalling removes the
+program, the manifest, and the re-downloadable `assets\cache`, and leaves that
+session data in place.
 
 The mingw cross build from Linux uses the same sources:
 
@@ -295,7 +298,8 @@ license: NanoVG (MIT), Material Symbols (Apache-2.0), the Khronos GL headers
   licensed encoder is required before redistribution.
 - The NSIS installer ships the executable, license, icon, and
   `assets/manifest.json` (URL/hash metadata only). The art itself is fetched
-  on first run into `assets/cache` under the install directory.
+  on first run into `assets/cache` under the install directory. Uninstall
+  deletes that cache; the session in `%LOCALAPPDATA%\puck-kiosk` stays.
 - There is no IME or text-entry field, no platform authenticator (the passkey
   button re-authorizes the actor connection), and no kiosk lock: Escape closes
   the window.

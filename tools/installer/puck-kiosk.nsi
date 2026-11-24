@@ -10,10 +10,13 @@
 ;   - Shortcuts start puck-kiosk.exe with no arguments and $INSTDIR as the
 ;     working directory (NSIS stores $OUTDIR in the shortcut).
 ;   - Uninstaller registered under HKCU for Settings > Apps.
+;   - The app keeps its cookie jar and saved car session in
+;     %LOCALAPPDATA%\puck-kiosk, outside the install directory; uninstall
+;     leaves that user data alone.
 ;   - The executable, the MIT license text, and (when the sprite has been
 ;     fetched) the icon are installed. The icon is also compiled into
 ;     puck-kiosk.exe at build time; no models, textures, or fonts are
-;     installed.
+;     installed. Uninstall removes the re-downloadable assets/cache.
 
 ; The icon comes from the same sprite-derived .ico as the executable. It is
 ; optional: a build without tools/fetch-assets falls back to the executable's
@@ -163,12 +166,16 @@ Section "Uninstall"
     Delete "$INSTDIR\puck-kiosk.ico"
     Delete "$INSTDIR\LICENSE.txt"
     Delete "$INSTDIR\assets\manifest.json"
+    ; The art is re-downloadable, so the cache goes with the program. The
+    ; session in %LOCALAPPDATA%\puck-kiosk is user data and stays.
+    RMDir /r "$INSTDIR\assets\cache"
     RMDir "$INSTDIR\assets"
+    ; Older builds kept the session store in the working directory.
+    RMDir /r "$INSTDIR\build\puck-kiosk"
+    RMDir "$INSTDIR\build"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"
 
     DeleteRegKey HKCU "${UNINSTALL_KEY}"
     DeleteRegKey HKCU "${SETTINGS_KEY}"
-
-    ; The app's own session and cache directories are user data and stay.
 SectionEnd

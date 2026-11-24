@@ -765,7 +765,15 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
     // the loading state immediately instead.
     const bool snapshot_mode = backend_name == "headless" || backend_name == "win32-headless" ||
                                (backend_name == "win32" && options.platform.frames > 0);
-    AssetFetcher assets(*platform.http);
+    // Asset downloads run on their own thread, so they get their own client:
+    // sharing the serialized session client would queue every download behind
+    // session validation and remote-hash discovery and delay the QR.
+    std::string asset_http_error;
+    auto asset_http = create_http_client(&asset_http_error);
+    if (!asset_http) {
+        log::warn("%s; asset downloads share the session client", asset_http_error.c_str());
+    }
+    AssetFetcher assets(asset_http ? *asset_http : *platform.http);
     bool puck_upgraded = false;
     auto upgrade_puck = [&]() -> bool {
         if (puck_upgraded || !assets.finished()) {

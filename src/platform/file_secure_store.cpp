@@ -6,10 +6,44 @@
 #include <sstream>
 #include <system_error>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace pk {
 namespace {
 
+#if defined(_WIN32)
+std::filesystem::path windows_environment_path(const wchar_t* name) {
+    wchar_t buffer[32768];
+    const DWORD length = GetEnvironmentVariableW(name, buffer, 32768);
+    if (length > 0 && length < 32768) {
+        return std::filesystem::path(buffer);
+    }
+    return {};
+}
+#endif
+
 std::filesystem::path default_directory() {
+#if defined(_WIN32)
+    // A shortcut starts the app with the install directory as its working
+    // directory, so session data must not live there: it would survive
+    // uninstall and fail on a read-only install. Windows keeps the cookie jar
+    // and saved car session under %LOCALAPPDATA%\puck-kiosk instead.
+    if (auto local = windows_environment_path(L"LOCALAPPDATA"); !local.empty()) {
+        return local / L"puck-kiosk";
+    }
+    if (auto profile = windows_environment_path(L"USERPROFILE"); !profile.empty()) {
+        return profile / L"AppData" / L"Local" / L"puck-kiosk";
+    }
+    return std::filesystem::path("build") / "puck-kiosk";
+#else
     if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg) {
         return std::filesystem::path(xdg) / "puck-kiosk";
     }
@@ -17,6 +51,7 @@ std::filesystem::path default_directory() {
         return std::filesystem::path(home) / ".config" / "puck-kiosk";
     }
     return std::filesystem::path("build") / "puck-kiosk";
+#endif
 }
 
 bool safe_key(const std::string& key) {

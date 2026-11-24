@@ -103,6 +103,13 @@ bool parse_render_scale(const char* value, float* out) {
 }  // namespace
 
 int main(int argc, char** argv) {
+#if defined(PUCK_KIOSK_BACKEND_WIN32)
+    // The executable is linked as a GUI-subsystem program so a shortcut launch
+    // opens no console window. A launch with arguments came from a shell, so
+    // attach to that console and keep the log visible.
+    const bool console = pk::attach_process_console(argc);
+    pk::log::info("win32: console=%s", console ? "attached" : "none");
+#endif
     pk::AppOptions options;
 #if defined(PUCK_KIOSK_BACKEND_WIN32)
     options.platform.backend = "win32";
