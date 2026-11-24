@@ -277,7 +277,7 @@ void NanoVgCanvas::text(float x, float y, const TextStyle& style, const std::str
         // center the actual glyph box so labels look centered in their rects.
         nvgTextAlign(context_, to_align(style.align, TextVAlign::Baseline));
         float bounds[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        nvgTextBounds(context_, 0.0f, 0.0f, value.c_str(), nullptr, bounds);
+        nvgTextInkBounds(context_, 0.0f, 0.0f, value.c_str(), nullptr, bounds);
         draw_y = y - (bounds[1] + bounds[3]) * 0.5f;
     }
     const float offset = weight_offset(style, bold_face_);

@@ -175,6 +175,27 @@ int main() {
                      static_cast<double>(option->rect.y + option->rect.h));
         ++failures;
     }
+    // A muted call must show its caption line (live transcripts use it too).
+    ui.set_sheet({});
+    pk::CallView muted;
+    muted.phase = pk::CallPhase::Muted;
+    muted.caption = "Microphone off";
+    ui.set_call(muted);
+    renderer.begin(display.size(), display.dpi_scale());
+    ui.draw(renderer.canvas(), display.size(), 1.0f);
+    renderer.end();
+    display.swap();
+    if (!read_ppm(output, &image)) {
+        return fail("cannot read the muted-call frame");
+    }
+    const InkBounds caption = ink_bounds(image, pk::Rect{400.0f, 640.0f, 480.0f, 60.0f});
+    if (!caption.found || caption.pixels < 40) {
+        std::fprintf(stderr, "the muted call drew no caption ink\n");
+        ++failures;
+    } else {
+        std::printf("PASS: muted call shows its caption\n");
+    }
+
     if (failures == 0) {
         std::printf("PASS: button label is vertically and horizontally centered\n");
     }

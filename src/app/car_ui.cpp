@@ -513,10 +513,12 @@ std::string call_caption(const CallView& call) {
         case CallPhase::Failed:
             return call.detail.empty() ? "Call failed" : call.detail;
         case CallPhase::Idle:
+            return {};
         case CallPhase::Active:
         case CallPhase::Speaking:
         case CallPhase::Muted:
-            return {};
+            // Live transcript captions and state text ("Microphone off").
+            return call.caption;
     }
     return {};
 }
