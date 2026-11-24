@@ -1,7 +1,6 @@
 #include "platform/win32/win32_display.h"
 
 #include "core/log.h"
-#include "nanovg_gl3_functions.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -21,6 +20,8 @@
 #include <windowsx.h>
 #include <GL/gl.h>
 #include <GL/wglext.h>
+
+#include "nanovg_gl3_functions.h"
 
 #include <algorithm>
 #include <cstdint>
