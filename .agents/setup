@@ -64,6 +64,14 @@ packages=(
     libqrencode-dev
     libgstreamer1.0-dev
     libgstreamer-plugins-base1.0-dev
+    # Windows cross-build and wine smoke test (--backend=win32).
+    mingw-w64
+    wine64
+    zbar-tools
+    xvfb
+    libgl1
+    libglx-mesa0
+    libgl1-mesa-dri
 )
 missing=()
 for package in "${packages[@]}"; do

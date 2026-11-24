@@ -218,7 +218,11 @@ std::int64_t parse_expiry_ms(const std::string& raw) {
     utc.tm_min = minute;
     utc.tm_sec = second;
     utc.tm_isdst = 0;
+#if defined(_WIN32)
+    const std::time_t seconds = _mkgmtime(&utc);
+#else
     const std::time_t seconds = timegm(&utc);
+#endif
     if (seconds == static_cast<std::time_t>(-1)) {
         return 0;
     }

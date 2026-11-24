@@ -5,15 +5,9 @@ set_encodings("utf-8")
 
 add_rules("mode.debug", "mode.release")
 
-add_requires("ixwebsocket v12.1.0", {configs = {ssl = "openssl", use_tls = true}})
-add_requires("libdatachannel 0.24.6", {configs = {media = true}})
-add_requires("pkgconfig::webrtc-audio-processing-1")
-add_requires("pkgconfig::alsa")
-add_requires("pkgconfig::opus")
-
 option("backend")
     set_default("headless")
-    set_values("headless", "drm", "wayland", "x11")
+    set_values("headless", "drm", "wayland", "x11", "win32")
     set_description("Display/input backend to build")
 option_end()
 
@@ -23,8 +17,40 @@ option("puck3d")
 option_end()
 
 local backend = get_config("backend") or "headless"
+local win32 = backend == "win32"
+if win32 and not is_plat("windows", "mingw") then
+    raise("--backend=win32 needs a Windows target: xmake f -p mingw -a x64 --backend=win32")
+end
+
 local puck3d = get_config("puck3d")
-if puck3d == nil then puck3d = true end
+if puck3d == nil then puck3d = not win32 end
+if win32 then
+    -- Puck3D is a GLES 3.0 renderer. The Windows backend uses desktop GL 3.3
+    -- for the 2D canvas, so the 3D pass stays disabled until it is ported.
+    puck3d = false
+end
+
+if win32 then
+    -- The mingw cross build and the native MSVC build share this list.
+    -- libcurl uses Schannel. IXWebSocket and libdatachannel both use OpenSSL 3
+    -- so the process links one TLS implementation (OpenSSL 3 is what the
+    -- libdatachannel port requires).
+    add_repositories("puck-kiosk-packages third_party/xmake-repo")
+    add_requires("libcurl")
+    add_requires("libwebp", {configs = {shared = false}})
+    add_requires("libpng")
+    add_requires("libjpeg")
+    add_requires("libqrencode")
+    add_requires("libopus")
+    add_requires("ixwebsocket v12.1.0", {configs = {ssl = "openssl3", use_tls = true}})
+    add_requires("libdatachannel 0.24.6", {configs = {media = true}})
+else
+    add_requires("ixwebsocket v12.1.0", {configs = {ssl = "openssl", use_tls = true}})
+    add_requires("libdatachannel 0.24.6", {configs = {media = true}})
+    add_requires("pkgconfig::webrtc-audio-processing-1")
+    add_requires("pkgconfig::alsa")
+    add_requires("pkgconfig::opus")
+end
 
 if backend == "drm" then
     add_requires("pkgconfig::libdrm")
@@ -36,7 +62,12 @@ end
 
 target("nanovg")
     set_kind("static")
-    add_files("third_party/nanovg/nanovg.c", "third_party/nanovg/nanovg_gles3.c")
+    if win32 then
+        add_files("third_party/nanovg/nanovg.c", "third_party/nanovg/nanovg_gl3.c")
+        add_syslinks("opengl32")
+    else
+        add_files("third_party/nanovg/nanovg.c", "third_party/nanovg/nanovg_gles3.c")
+    end
     add_includedirs("third_party/nanovg", { public = true })
     set_warnings("none")
 
@@ -46,29 +77,54 @@ target("puck-kiosk")
     set_rundir("$(projectdir)")
     add_deps("nanovg")
     add_files("src/**.cpp")
-    if backend == "drm" then
-        add_files("src/platform/drm/*.cpp")
-        if not has_package("pkgconfig::libinput") then
-            remove_files("src/platform/drm/libinput_input.cpp")
+    add_includedirs("src", "third_party")
+    if win32 then
+        remove_files("src/platform/drm/**.cpp")
+        remove_files("src/platform/headless/**.cpp")
+        remove_files("src/platform/audio_alsa.cpp")
+        remove_files("src/puck/puck_3d*.cpp")
+        add_packages("libcurl", "libwebp", "libpng", "libjpeg", "libqrencode",
+                     "libopus", "ixwebsocket", "libdatachannel")
+        add_links("opengl32", "gdi32", "user32", "ole32", "winmm", "uuid", "ws2_32", "crypt32",
+                  "iphlpapi", "bcrypt", "secur32", "advapi32", "wldap32", "mmdevapi")
+        if is_plat("mingw") then
+            add_syslinks("winpthread")
+        end
+        add_defines("PUCK_KIOSK_BACKEND_WIN32=1")
+        add_defines("PUCK_KIOSK_CANVAS_NANOVG_GL3=1")
+        add_defines("SCTP_STDINT_INCLUDE=<stdint.h>")
+        if is_plat("mingw") then
+            -- mingw's printf otherwise rejects the C99 %zu used by the logger.
+            add_defines("__USE_MINGW_ANSI_STDIO=1")
+            -- Keep the .exe self-contained: no libstdc++/libgcc/winpthread DLLs.
+            add_ldflags("-static", "-static-libgcc", "-static-libstdc++")
+            add_cxflags("-Wno-cast-function-type")
         end
     else
-        remove_files("src/platform/drm/**.cpp")
-    end
-    add_includedirs("src", "third_party")
-    add_packages("ixwebsocket", "libdatachannel", "pkgconfig::webrtc-audio-processing-1",
-                 "pkgconfig::alsa", "pkgconfig::opus")
-    if backend == "drm" then
-        add_packages("pkgconfig::libdrm", "pkgconfig::gbm", "pkgconfig::libudev")
-        if has_package("pkgconfig::libinput") then
-            add_packages("pkgconfig::libinput")
-            add_defines("PUCK_KIOSK_HAVE_LIBINPUT=1")
+        remove_files("src/platform/win32/**.cpp")
+        if backend == "drm" then
+            add_files("src/platform/drm/*.cpp")
+            if not has_package("pkgconfig::libinput") then
+                remove_files("src/platform/drm/libinput_input.cpp")
+            end
+        else
+            remove_files("src/platform/drm/**.cpp")
         end
+        add_packages("ixwebsocket", "libdatachannel", "pkgconfig::webrtc-audio-processing-1",
+                     "pkgconfig::alsa", "pkgconfig::opus")
+        if backend == "drm" then
+            add_packages("pkgconfig::libdrm", "pkgconfig::gbm", "pkgconfig::libudev")
+            if has_package("pkgconfig::libinput") then
+                add_packages("pkgconfig::libinput")
+                add_defines("PUCK_KIOSK_HAVE_LIBINPUT=1")
+            end
+        end
+        add_links("EGL", "GLESv2", "m", "dl", "pthread", "png", "webp", "jpeg", "curl", "qrencode",
+                  "ssl", "crypto")
+        add_defines("PUCK_KIOSK_ENABLE_AEC=1")
+        add_defines("PUCK_KIOSK_ENABLE_ALSA=1")
     end
-    add_links("EGL", "GLESv2", "m", "dl", "pthread", "png", "webp", "jpeg", "curl", "qrencode", "ssl",
-              "crypto")
     add_defines("PUCK_KIOSK_BACKEND_" .. backend:upper() .. "=1")
-    add_defines("PUCK_KIOSK_ENABLE_AEC=1")
-    add_defines("PUCK_KIOSK_ENABLE_ALSA=1")
     if puck3d then
         add_defines("PUCK_KIOSK_ENABLE_3D=1")
     end
@@ -126,6 +182,10 @@ target("voice-tests")
     set_rundir("$(projectdir)")
     add_files("tests/voice_tests.cpp", "src/voice/rtp.cpp", "src/voice/jitter_buffer.cpp", "src/voice/opus_codec.cpp")
     add_includedirs("src")
-    add_packages("pkgconfig::opus")
+    if win32 then
+        add_packages("libopus")
+    else
+        add_packages("pkgconfig::opus")
+    end
     add_links("m", "pthread")
     set_warnings("all", "extra")

@@ -16,12 +16,12 @@ void print_help(const char* program) {
     std::cout << "puck-kiosk " << program << "\n\n"
               << "Usage: " << program << " [options]\n\n"
               << "Options:\n"
-              << "  --headless              Use the headless EGL backend (default)\n"
-              << "  --platform <name>       headless | drm | wayland | x11\n"
+              << "  --headless              Use the headless backend (default on Linux)\n"
+              << "  --platform <name>       headless | drm | wayland | x11 | win32\n"
               << "  --width <px>            Surface width (default 1280)\n"
               << "  --height <px>           Surface height (default 720)\n"
-              << "  --frames <n>            Render n frames (default 1)\n"
-              << "  --out <path>            PPM output for the last headless frame\n"
+              << "  --frames <n>            Render n frames (default 1; 0 = until the win32 window closes)\n"
+              << "  --out <path>            PPM output for the last rendered frame\n"
               << "  --font <path>           TTF/OTF font used by the 2D canvas\n"
               << "  --no-3d                 Force the 2D Puck renderer\n"
               << "  --pair                  Pair with a phone, render the QR, then connect the actor\n"
@@ -44,7 +44,7 @@ void print_help(const char* program) {
               << "  --input-script <json|path> Scripted {t,type,...} pointer/key/gamepad events; test hook\n"
               << "  --dump-targets          Log the hit rects of the current screen\n"
               << "  --echo-cancellation <m> on|remote-only|off (default on)\n"
-              << "  --audio <name>          auto | file | null | alsa\n"
+              << "  --audio <name>          auto | file | null | alsa | wasapi\n"
               << "  --voice-out <path>      WAV sink for decoded call audio\n"
               << "  --voice-capture <path>  WAV of the synthetic capture signal\n"
               << "  --voice-in <path>       Mono 48 kHz WAV used as capture input instead of the tone\n"
@@ -83,7 +83,11 @@ bool parse_nonnegative_int(const char* value, int* out) {
 
 int main(int argc, char** argv) {
     pk::AppOptions options;
+#if defined(PUCK_KIOSK_BACKEND_WIN32)
+    options.platform.backend = "win32";
+#else
     options.platform.backend = "headless";
+#endif
     options.platform.width = 1280;
     options.platform.height = 720;
     options.platform.frames = 1;
@@ -189,7 +193,8 @@ int main(int argc, char** argv) {
         }
         if (argument == "--audio" && i + 1 < argc) {
             const std::string audio = argv[++i];
-            if (audio != "auto" && audio != "file" && audio != "null" && audio != "alsa") {
+            if (audio != "auto" && audio != "file" && audio != "null" && audio != "alsa" &&
+                audio != "wasapi") {
                 pk::log::error("invalid --audio value: %s", audio.c_str());
                 return 2;
             }
@@ -256,7 +261,7 @@ int main(int argc, char** argv) {
             continue;
         }
         if (argument == "--frames" && i + 1 < argc) {
-            if (!parse_int(argv[++i], &options.platform.frames)) {
+            if (!parse_nonnegative_int(argv[++i], &options.platform.frames)) {
                 pk::log::error("invalid --frames");
                 return 2;
             }

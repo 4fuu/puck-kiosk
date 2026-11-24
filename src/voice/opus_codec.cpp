@@ -1,6 +1,6 @@
 #include "voice/opus_codec.h"
 
-#include <opus.h>
+#include <opus/opus.h>
 
 namespace pk::voice {
 namespace {

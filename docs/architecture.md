@@ -19,14 +19,14 @@ board or OS.
 main.cpp
   └─ App
        ├─ Platform (create_platform)
-       │    ├─ Display        surface + EGL/GL context
+       │    ├─ Display        surface + EGL/WGL context
        │    ├─ InputSource    touch / pointer / keys
        │    ├─ AudioIO        PCM capture and playback
        │    ├─ HttpClient     pairing, session, assets
        │    ├─ WebSocketFactory  actor JSON-RPC
        │    └─ SecureStore    session cookie / actor token
        ├─ Renderer
-       │    └─ Canvas         NanoVG GLES3 in M0
+       │    └─ Canvas         NanoVG GLES3 (Linux) / NanoVG GL3 (Windows)
        ├─ PuckView
        │    ├─ Puck2D         sprite + face curves
        │    └─ Puck3D         PUCK v2 + GLES 3.0 (M1)
@@ -37,14 +37,14 @@ main.cpp
 
 | Seam | Owns | M0 implementation | Embedded target | Desktop target |
 | --- | --- | --- | --- | --- |
-| `Display` | surface, EGL context, swap | `HeadlessDisplay` (surfaceless) | DRM/KMS + GBM | Wayland/X11 |
-| `InputSource` | pointer/touch/key events | none (headless) | libinput/evdev | libinput/Wayland |
-| `AudioIO` | PCM in/out | none | ALSA | PulseAudio/ALSA |
-| `HttpClient` | HTTP + cookie jar | none | libcurl + mbedTLS/OpenSSL | libcurl |
-| `WebSocketFactory` | actor socket | none | IXWebSocket/libwebsockets | same |
-| `SecureStore` | cookie/token at rest | none | encrypted file / TPM | keyring |
-| `Canvas` | 2D drawing + text | NanoVG GLES3 | NanoVG or LVGL | NanoVG or Skia |
-| `PuckView` | Puck drawing | `Puck2D` | `Puck2D`/`Puck3D` | same |
+| `Display` | surface, EGL/WGL context, swap | `HeadlessDisplay` (surfaceless) | DRM/KMS + GBM | Win32 + WGL (implemented); Wayland/X11 (planned) |
+| `InputSource` | pointer/touch/key events | none (headless) | libinput/evdev | Win32 messages (implemented); libinput/Wayland (planned) |
+| `AudioIO` | PCM in/out | none | ALSA | WASAPI (implemented); PulseAudio/ALSA (planned) |
+| `HttpClient` | HTTP + cookie jar | none | libcurl + mbedTLS/OpenSSL | libcurl (Schannel on Windows) |
+| `WebSocketFactory` | actor socket | none | IXWebSocket/libwebsockets | same, OpenSSL 3 on Windows |
+| `SecureStore` | cookie/token at rest | none | encrypted file / TPM | file store |
+| `Canvas` | 2D drawing + text | NanoVG GLES3 | NanoVG or LVGL | NanoVG GL3 on Windows; NanoVG or Skia elsewhere |
+| `PuckView` | Puck drawing | `Puck2D` | `Puck2D`/`Puck3D` | same; `Puck3D` is GLES-only and not built for Win32 |
 
 Only `create_platform()` and the backend translation units change when a new
 board is added. `App`, `CarUi`, `Renderer`, and `PuckView` must not include OS
@@ -69,7 +69,9 @@ while (!display->should_close()) {
 ```
 
 The headless backend renders into an FBO and writes a PPM on the last frame.
-A real backend swaps an EGL surface or a DRM/KMS page flip instead.
+A real backend swaps an EGL surface or a DRM/KMS page flip instead. The Win32
+backend swaps the WGL window buffer and can write the last frame to a PPM the
+same way.
 
 ## DRM/KMS backend
 
@@ -120,6 +122,79 @@ compilation and by its error paths only. On a real board, check:
 6. `Ctrl-C` or a service stop restores the previous CRTC and console.
 7. On a multi-GPU board, `PUCK_KIOSK_DRM_DEVICE=/dev/dri/card1` selects the
    display controller.
+
+## Windows backend
+
+`--backend=win32` builds the desktop target in `src/platform/win32/`. It is a
+compile-time selection like DRM; the app, renderer, and Puck code still include
+no OS headers.
+
+- `Win32Display` creates a normal `WS_OVERLAPPEDWINDOW` window whose client
+  area matches `--width`/`--height`, chooses a 32-bit double-buffered pixel
+  format with an 8-bit stencil buffer, and creates an OpenGL 3.3 core context
+  through `wglCreateContextAttribsARB`. `--platform headless` uses the same
+  path with the window hidden and writes the last frame from `GL_BACK` to a
+  PPM, which is the Windows equivalent of the Linux headless smoke test.
+  `--frames 0` keeps the window open until `WM_CLOSE`, `WM_DESTROY`, or Escape.
+- The process is per-monitor DPI aware (v2 when the OS provides
+  `SetProcessDpiAwarenessContext`). Layout coordinates stay in pixels and
+  `dpi_scale()` returns 1.0, so the render size is the physical client size.
+- `Win32Input` pumps the Win32 message queue and converts
+  `WM_POINTERDOWN/UPDATE/UP` (touch and pen) into the existing `InputEvent`
+  types. Systems without the pointer API use `WM_TOUCH` instead, and the mouse
+  uses `WM_MOUSEMOVE`/`WM_LBUTTONDOWN`/`WM_LBUTTONUP`. `WM_KEYDOWN` emits
+  Escape (key 27) and function keys, `WM_CHAR` emits printable characters, and
+  `WM_CLOSE`/`WM_DESTROY` emit `Quit`. Client coordinates are scaled to the
+  render size, so resizing the window does not shift the hit targets.
+- `NanoVgCanvas` selects `nvgCreateGL3` when `PUCK_KIOSK_CANVAS_NANOVG_GL3` is
+  defined. Windows' `opengl32.dll` only exports OpenGL 1.1, so
+  `src/platform/win32/gl_loader.cpp` resolves the 3.3 entry points with
+  `wglGetProcAddress`; NanoVG's GL3 implementation is the unmodified vendored
+  `nanovg_gl.h` with those calls mapped onto the loader table. The `Canvas`
+  API does not change.
+- `WasapiAudioIO` opens the default capture and render endpoints in shared mode
+  with `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM` (48 kHz mono 16-bit PCM by
+  default). WASAPI event threads move samples through bounded ring buffers;
+  `read_capture` returns zero when no packet is ready, matching ALSA. If either
+  default endpoint is missing or COM/device activation fails, the platform
+  factory logs the HRESULT and falls back to the file/null backend.
+- AEC is compiled out on Windows because `webrtc-audio-processing` has no
+  mingw or Windows xmake package. `create_platform()` logs
+  `AEC: built without webrtc-audio-processing on Windows; echo cancellation is
+  disabled`. Opus and libdatachannel stay linked, so calls work without AEC.
+- Dependencies: libcurl with Schannel, IXWebSocket and libdatachannel with
+  OpenSSL 3, Opus, libpng/libjpeg/libwebp, and libqrencode. The local packages
+  in `third_party/xmake-repo/` only override the mingw install rules for
+  libdatachannel and IXWebSocket; see that directory's README.
+- `Puck3D` is not compiled for this backend (`PUCK_KIOSK_ENABLE_3D` is not
+  defined), so `create_puck_view()` returns `Puck2D`.
+
+### Build and verify
+
+- Cross build from Linux: `xmake f -y -p mingw -a x64 -m release
+  --backend=win32`, then `xmake build -y`. Use xmake's `mingw` platform rather
+  than `-p windows`: the Windows dependency ports select their mingw install
+  path from the target platform.
+- Native build: `xmake f -y -p windows -a x64 -m release --backend=win32
+  --toolchain=msvc`, then `xmake build -y`. `clang-cl` works the same way.
+- Smoke run: `wine build/mingw/x64/release/puck-kiosk.exe --platform win32
+  --frames 1 --out build/win32.ppm`.
+- The orb verifies the WGL context, PPM output, a real pairing QR decoded with
+  `zbarimg`, a scripted mute click, and Escape/WM_CLOSE. A real Windows PC must
+  still verify the WASAPI endpoints, AEC-off behavior, DPI on the target panel,
+  and the live actor/voice flow.
+
+### First-run checklist
+
+1. The log shows `win32: WGL window, GL 3.3 ...` (a newer core context is
+   fine).
+2. `audio backend: wasapi` rather than `file`; check the default capture and
+   render devices and the Windows microphone privacy setting.
+3. The pairing QR scans and phone approval completes.
+4. Touch or the mouse hits all four corners of the panel and Escape closes the
+   window.
+5. On a high-DPI panel, pass physical `--width`/`--height`; the layout does not
+   rescale automatically.
 
 ## Puck 2D and 3D
 

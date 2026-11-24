@@ -3,7 +3,11 @@
 #include "core/log.h"
 
 #include <nanovg.h>
+#if defined(PUCK_KIOSK_CANVAS_NANOVG_GL3)
+#include <nanovg_gl3_api.h>
+#else
 #include <nanovg_gles3_api.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -19,12 +23,15 @@ NVGcolor to_nvg(Color color) {
 }
 
 std::string default_font_path() {
-    const char* candidates[] = {
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-    };
-    for (const char* candidate : candidates) {
+    std::vector<std::string> candidates;
+    const char* windir = std::getenv("WINDIR");
+    const std::string windows = windir && *windir ? windir : "C:/Windows";
+    candidates.push_back(windows + "/Fonts/segoeui.ttf");
+    candidates.push_back(windows + "/Fonts/arial.ttf");
+    candidates.push_back("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+    candidates.push_back("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf");
+    candidates.push_back("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf");
+    for (const std::string& candidate : candidates) {
         if (std::filesystem::exists(candidate)) {
             return candidate;
         }
@@ -51,6 +58,9 @@ std::string bold_sibling(const std::string& path) {
     names.push_back(stem + "-Bold" + extension);
     names.push_back(stem + "Bold" + extension);
     names.push_back(stem + "-Semibold" + extension);
+    // Windows system fonts use compact suffixes: segoeuib.ttf, arialbd.ttf.
+    names.push_back(stem + "b" + extension);
+    names.push_back(stem + "bd" + extension);
     for (const std::string& name : names) {
         const fs::path candidate = font.parent_path() / name;
         if (fs::exists(candidate)) {
@@ -99,12 +109,25 @@ void apply_text_state(NVGcontext* context, const TextStyle& style, bool bold_fac
 
 NanoVgCanvas::~NanoVgCanvas() {
     if (context_) {
+#if defined(PUCK_KIOSK_CANVAS_NANOVG_GL3)
+        nvgDeleteGL3(context_);
+#else
         nvgDeleteGLES3(context_);
+#endif
         context_ = nullptr;
     }
 }
 
 bool NanoVgCanvas::initialize(const std::string& font_path, std::string* error) {
+#if defined(PUCK_KIOSK_CANVAS_NANOVG_GL3)
+    context_ = nvgCreateGL3(NVG_ANTIALIAS | NVG_STENCIL_STROKES);
+    if (!context_) {
+        if (error) {
+            *error = "nvgCreateGL3 failed";
+        }
+        return false;
+    }
+#else
     context_ = nvgCreateGLES3(NVG_ANTIALIAS | NVG_STENCIL_STROKES);
     if (!context_) {
         if (error) {
@@ -112,6 +135,7 @@ bool NanoVgCanvas::initialize(const std::string& font_path, std::string* error) 
         }
         return false;
     }
+#endif
 
     const std::string path = font_path.empty() ? default_font_path() : font_path;
     if (path.empty()) {
