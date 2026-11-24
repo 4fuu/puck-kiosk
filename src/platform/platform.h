@@ -15,6 +15,7 @@ struct PlatformOptions {
     int width = 1280;
     int height = 720;
     int frames = 1;
+    bool fullscreen = false;
     std::string output_path;
     std::string audio_backend = "auto";  // auto | file | null | alsa
     std::string audio_input_path;

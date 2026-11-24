@@ -18,6 +18,7 @@ void print_help(const char* program) {
               << "Options:\n"
               << "  --headless              Use the headless backend (default on Linux)\n"
               << "  --platform <name>       headless | drm | wayland | x11 | win32\n"
+              << "  --fullscreen            Borderless win32 window with an exact --width/--height client\n"
               << "  --width <px>            Surface width (default 1280)\n"
               << "  --height <px>           Surface height (default 720)\n"
               << "  --frames <n>            Render n frames (default 1; 0 = until the win32 window closes)\n"
@@ -101,6 +102,10 @@ int main(int argc, char** argv) {
         }
         if (argument == "--headless") {
             options.platform.backend = "headless";
+            continue;
+        }
+        if (argument == "--fullscreen") {
+            options.platform.fullscreen = true;
             continue;
         }
         if (argument == "--no-3d") {

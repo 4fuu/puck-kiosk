@@ -12,7 +12,8 @@ namespace pk {
 // hidden window still renders and writes the PPM frame.
 class Win32Display final : public Display {
 public:
-    Win32Display(int width, int height, std::string output_path, int frames, bool visible);
+    Win32Display(int width, int height, std::string output_path, int frames, bool visible,
+                 bool fullscreen);
     ~Win32Display() override;
 
     bool initialize(std::string* error) override;
