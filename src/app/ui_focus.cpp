@@ -13,6 +13,13 @@ float squared_distance(const Rect& from, const Rect& to) {
     return dx * dx + dy * dy;
 }
 
+// The client caption's window controls are pointer-only chrome. Gamepad focus
+// stays on the app content, like the OS title bar buttons it replaces.
+bool is_window_control(UiAction action) {
+    return action == UiAction::WindowMinimize || action == UiAction::WindowMaximize ||
+           action == UiAction::WindowClose;
+}
+
 }  // namespace
 
 void UiFocus::sync() {
@@ -33,7 +40,7 @@ void UiFocus::refresh_targets() {
     targets_.clear();
     if (map_) {
         for (const UiTarget& target : map_->targets()) {
-            if (target.action == UiAction::None) {
+            if (target.action == UiAction::None || is_window_control(target.action)) {
                 continue;
             }
             // A later blocker or overlapping target wins the point at this

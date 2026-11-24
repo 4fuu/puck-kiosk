@@ -53,6 +53,24 @@ public:
     virtual void begin_frame(Size size, float dpi_scale) = 0;
     virtual void end_frame() = 0;
 
+    // Saves and restores the drawing state, including the translation below.
+    // Backends without a transform treat these as no-ops.
+    virtual void save() {}
+    virtual void restore() {}
+    virtual void translate(float, float) {}
+
+    // The translation currently applied by translate(), in surface pixels.
+    // A backend that composites outside the 2D transform (Puck3D's raw GL
+    // pass) uses it to place its output in the same space.
+    virtual void translation(float* x, float* y) const {
+        if (x) {
+            *x = 0.0f;
+        }
+        if (y) {
+            *y = 0.0f;
+        }
+    }
+
     // Makes every drawing call issued so far visible without ending the frame.
     // A renderer that draws with raw GL between 2D calls can flush here, so the
     // 3D pass lands over the background and later 2D drawing lands over it.

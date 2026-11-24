@@ -1282,16 +1282,24 @@ void Puck3D::Impl::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual,
     if (!ready || failed || bounds.w <= 0.0f || bounds.h <= 0.0f) {
         return;
     }
-    const float fit = std::min(bounds.w / static_cast<float>(rig.width),
-                               bounds.h / static_cast<float>(rig.height));
+    // The 2D canvas may be translated (the client caption strip shifts app
+    // content down). The composite pass uses raw GL, so move the layout into
+    // surface space here; a zero translation keeps the old coordinates.
+    float canvas_x = 0.0f;
+    float canvas_y = 0.0f;
+    canvas.translation(&canvas_x, &canvas_y);
+    const Rect surface_bounds{bounds.x + canvas_x, bounds.y + canvas_y, bounds.w, bounds.h};
+    const Rect surface_stage{stage.x + canvas_x, stage.y + canvas_y, stage.w, stage.h};
+    const float fit = std::min(surface_bounds.w / static_cast<float>(rig.width),
+                               surface_bounds.h / static_cast<float>(rig.height));
     const float image_width = fit * static_cast<float>(rig.width);
     const float image_height = fit * static_cast<float>(rig.height);
-    const float image_left = bounds.center_x() - image_width * 0.5f;
-    const float image_top = bounds.center_y() - image_height * 0.5f;
+    const float image_left = surface_bounds.center_x() - image_width * 0.5f;
+    const float image_top = surface_bounds.center_y() - image_height * 0.5f;
     update_animation(&animation, visual, std::max(0.0f, time_seconds),
                      image_left + image_width * kPuckEyeX,
                      image_top + image_height * kPuckEyeY,
-                     std::max(160.0f, bounds.w * 1.5f));
+                     std::max(160.0f, surface_bounds.w * 1.5f));
 
     GLint surface[4] = {0, 0, 0, 0};
     glGetIntegerv(GL_VIEWPORT, surface);
@@ -1301,13 +1309,14 @@ void Puck3D::Impl::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual,
     // The web's play canvas extends 15% past each side, 55% above, and 12%
     // below the Puck so a grabbed body is not clipped. Use the stage plus the
     // same margins; the projection keeps the Puck at its layout position.
-    const float pad_x = 0.15f * bounds.w;
-    const float pad_top = 0.55f * bounds.h;
-    const float pad_bottom = 0.12f * bounds.h;
-    Rect target = stage;
+    const float pad_x = 0.15f * surface_bounds.w;
+    const float pad_top = 0.55f * surface_bounds.h;
+    const float pad_bottom = 0.12f * surface_bounds.h;
+    Rect target = surface_stage;
     if (target.w <= 0.0f || target.h <= 0.0f) {
-        target = Rect{bounds.x - pad_x, bounds.y - pad_top, bounds.w + pad_x * 2.0f,
-                      bounds.h + pad_top + pad_bottom};
+        target = Rect{surface_bounds.x - pad_x, surface_bounds.y - pad_top,
+                      surface_bounds.w + pad_x * 2.0f,
+                      surface_bounds.h + pad_top + pad_bottom};
     } else {
         target = Rect{target.x - pad_x, target.y - pad_top, target.w + pad_x * 2.0f,
                       target.h + pad_top + pad_bottom};
@@ -1317,8 +1326,8 @@ void Puck3D::Impl::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual,
     if (target_width <= 0 || target_height <= 0) {
         return;
     }
-    const float offset_x = bounds.center_x() - target.center_x();
-    const float offset_y = bounds.center_y() - target.center_y();
+    const float offset_x = surface_bounds.center_x() - target.center_x();
+    const float offset_y = surface_bounds.center_y() - target.center_y();
     const int viewport_x = surface[0] + static_cast<int>(std::floor(target.x));
     const int viewport_y = surface[1] + surface[3] - static_cast<int>(std::floor(target.y)) -
                            target_height;

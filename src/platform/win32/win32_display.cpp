@@ -67,6 +67,12 @@ struct Win32Display::Impl {
     bool fullscreen = false;
     bool quit = false;
     bool pointer_api = false;
+    ClientCaption caption;
+    bool maximized = false;
+    RECT restore_rect = {};
+    bool dragging = false;
+    POINT drag_cursor = {};
+    RECT drag_origin = {};
     std::string output_path;
     std::deque<InputEvent> events;
 
@@ -106,8 +112,11 @@ struct Win32Display::Impl {
         const int client_height = std::max(1, static_cast<int>(rect.bottom - rect.top));
         event.x = static_cast<float>(client.x) * static_cast<float>(width) /
                   static_cast<float>(client_width);
+        // App input lives below the client caption. The strip itself is hit
+        // tested with raw client coordinates in the mouse handlers.
         event.y = static_cast<float>(client.y) * static_cast<float>(height) /
-                  static_cast<float>(client_height);
+                      static_cast<float>(client_height) -
+                  caption.height;
         return event;
     }
 
@@ -175,17 +184,144 @@ struct Win32Display::Impl {
         CloseTouchInputHandle(reinterpret_cast<HTOUCHINPUT>(lparam));
     }
 
+    bool in_caption_drag_region(POINT client) const {
+        if (caption.height <= 0.0f) {
+            return false;
+        }
+        RECT rect = {};
+        GetClientRect(hwnd, &rect);
+        const int client_width = std::max(1, static_cast<int>(rect.right - rect.left));
+        return client.y >= 0 && static_cast<float>(client.y) < caption.height &&
+               static_cast<float>(client.x) <
+                   static_cast<float>(client_width) - caption.buttons_width;
+    }
+
+    void log_window_state(const char* label) const {
+        RECT outer = {};
+        RECT client = {};
+        GetWindowRect(hwnd, &outer);
+        GetClientRect(hwnd, &client);
+        log::info("win32: %s; window %dx%d at %d,%d, client %dx%d", label,
+                  static_cast<int>(outer.right - outer.left),
+                  static_cast<int>(outer.bottom - outer.top), static_cast<int>(outer.left),
+                  static_cast<int>(outer.top),
+                  static_cast<int>(client.right - client.left),
+                  static_cast<int>(client.bottom - client.top));
+    }
+
+    void begin_drag() {
+        if (dragging) {
+            return;
+        }
+        dragging = true;
+        GetCursorPos(&drag_cursor);
+        GetWindowRect(hwnd, &drag_origin);
+        SetCapture(hwnd);
+        log::info("win32: caption drag start at %ld,%ld", static_cast<long>(drag_cursor.x),
+                  static_cast<long>(drag_cursor.y));
+        log_window_state("caption drag origin");
+    }
+
+    void update_drag() {
+        if (!dragging) {
+            return;
+        }
+        POINT cursor = {};
+        if (!GetCursorPos(&cursor)) {
+            return;
+        }
+        const int dx = cursor.x - drag_cursor.x;
+        const int dy = cursor.y - drag_cursor.y;
+        if (dx == 0 && dy == 0) {
+            return;
+        }
+        SetWindowPos(hwnd, nullptr, drag_origin.left + dx, drag_origin.top + dy, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    void end_drag() {
+        if (!dragging) {
+            return;
+        }
+        dragging = false;
+        ReleaseCapture();
+        log_window_state("caption drag end");
+    }
+
+    void minimize() {
+        if (!hwnd) {
+            return;
+        }
+        log::info("win32: minimize: ShowWindow(SW_MINIMIZE)");
+        ShowWindow(hwnd, SW_MINIMIZE);
+        log::info("win32: minimize: iconic=%d", IsIconic(hwnd) ? 1 : 0);
+    }
+
+    void toggle_maximize() {
+        if (!hwnd) {
+            return;
+        }
+        if (IsIconic(hwnd)) {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        if (!maximized) {
+            GetWindowRect(hwnd, &restore_rect);
+            MONITORINFO info = {};
+            info.cbSize = sizeof(info);
+            const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if (!GetMonitorInfoW(monitor, &info)) {
+                log::warn("win32: cannot read the monitor work area for maximize");
+                return;
+            }
+            const int work_width = static_cast<int>(info.rcWork.right - info.rcWork.left);
+            const int work_height = static_cast<int>(info.rcWork.bottom - info.rcWork.top);
+            SetWindowPos(hwnd, nullptr, info.rcWork.left, info.rcWork.top, work_width,
+                         work_height, SWP_NOZORDER | SWP_NOACTIVATE);
+            maximized = true;
+            log::info("win32: maximize to work area %dx%d at %d,%d (restore %dx%d at %d,%d)",
+                      work_width, work_height, static_cast<int>(info.rcWork.left),
+                      static_cast<int>(info.rcWork.top),
+                      static_cast<int>(restore_rect.right - restore_rect.left),
+                      static_cast<int>(restore_rect.bottom - restore_rect.top),
+                      static_cast<int>(restore_rect.left),
+                      static_cast<int>(restore_rect.top));
+        } else {
+            SetWindowPos(hwnd, nullptr, restore_rect.left, restore_rect.top,
+                         restore_rect.right - restore_rect.left,
+                         restore_rect.bottom - restore_rect.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            maximized = false;
+            log::info("win32: restore to %dx%d at %d,%d",
+                      static_cast<int>(restore_rect.right - restore_rect.left),
+                      static_cast<int>(restore_rect.bottom - restore_rect.top),
+                      static_cast<int>(restore_rect.left),
+                      static_cast<int>(restore_rect.top));
+        }
+        log_window_state(maximized ? "maximized" : "restored");
+    }
+
     void handle_mouse(UINT message, LPARAM lparam) {
         POINT client = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         switch (message) {
             case WM_MOUSEMOVE:
+                update_drag();
                 events.push_back(pointer_event(InputEvent::Type::PointerMove, client));
                 break;
             case WM_LBUTTONDOWN:
                 events.push_back(pointer_event(InputEvent::Type::PointerDown, client));
+                if (in_caption_drag_region(client)) {
+                    begin_drag();
+                }
                 break;
             case WM_LBUTTONUP:
+                end_drag();
                 events.push_back(pointer_event(InputEvent::Type::PointerUp, client));
+                break;
+            case WM_LBUTTONDBLCLK:
+                if (in_caption_drag_region(client)) {
+                    end_drag();
+                    toggle_maximize();
+                }
                 break;
             default:
                 break;
@@ -201,6 +337,37 @@ struct Win32Display::Impl {
                 request_quit();
                 PostQuitMessage(0);
                 return 0;
+            case WM_CAPTURECHANGED:
+                dragging = false;
+                return 0;
+            case WM_SYSCOMMAND: {
+                // Keyboard and shell commands still reach a borderless window;
+                // route the window ones through the same custom controls.
+                const WPARAM command = wparam & 0xFFF0;
+                if (command == SC_MINIMIZE) {
+                    minimize();
+                    return 0;
+                }
+                if (command == SC_MAXIMIZE) {
+                    if (!maximized) {
+                        toggle_maximize();
+                    }
+                    return 0;
+                }
+                if (command == SC_RESTORE) {
+                    if (maximized) {
+                        toggle_maximize();
+                    } else {
+                        ShowWindow(hwnd, SW_RESTORE);
+                    }
+                    return 0;
+                }
+                if (command == SC_CLOSE) {
+                    request_quit();
+                    return 0;
+                }
+                break;
+            }
             case WM_ERASEBKGND:
                 return 1;
             case WM_PAINT: {
@@ -230,6 +397,7 @@ struct Win32Display::Impl {
             case WM_MOUSEMOVE:
             case WM_LBUTTONDOWN:
             case WM_LBUTTONUP:
+            case WM_LBUTTONDBLCLK:
                 handle_mouse(message, lparam);
                 return 0;
             case WM_KEYDOWN:
@@ -303,7 +471,7 @@ bool Win32Display::initialize(std::string* error) {
     HINSTANCE instance = GetModuleHandleW(nullptr);
     WNDCLASSEXW window_class = {};
     window_class.cbSize = sizeof(window_class);
-    window_class.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;
+    window_class.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     window_class.lpfnWndProc = Impl::window_proc;
     window_class.hInstance = instance;
     window_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));  // IDC_ARROW
@@ -312,18 +480,17 @@ bool Win32Display::initialize(std::string* error) {
         return set_error(error, "RegisterClassExW failed: " + hresult_text(HRESULT_FROM_WIN32(GetLastError())));
     }
 
-    const DWORD style = impl_->fullscreen ? WS_POPUP : WS_OVERLAPPEDWINDOW;
+    // Windowed mode is borderless too: the app draws its own caption strip in
+    // the client area, so there is no WS_CAPTION or WS_THICKFRAME to hide.
+    const DWORD style = WS_POPUP;
+    const DWORD ex_style =
+        impl_->visible && !impl_->fullscreen ? WS_EX_APPWINDOW : 0;
     int window_width = impl_->width;
     int window_height = impl_->height;
     int window_x = CW_USEDEFAULT;
     int window_y = CW_USEDEFAULT;
     bool cover_taskbar = false;
-    if (!impl_->fullscreen) {
-        RECT rect = {0, 0, impl_->width, impl_->height};
-        AdjustWindowRectEx(&rect, style, FALSE, 0);
-        window_width = rect.right - rect.left;
-        window_height = rect.bottom - rect.top;
-    } else {
+    if (impl_->fullscreen) {
         // Borderless popup: the window is the client area, centered in the
         // primary monitor's work area. At the monitor's native size it also
         // covers the taskbar, so raise it above the shell.
@@ -344,9 +511,11 @@ bool Win32Display::initialize(std::string* error) {
             window_y = 0;
         }
     }
-    impl_->hwnd = CreateWindowExW(0, kWindowClass, L"Puck Kiosk", style, window_x, window_y,
-                                  window_width, window_height, nullptr, nullptr, instance,
-                                  impl_.get());
+    impl_->hwnd = CreateWindowExW(ex_style, kWindowClass, L"Puck Kiosk", style, window_x,
+                                  window_y, window_width, window_height, nullptr, nullptr,
+                                  instance, impl_.get());
+    log::info("win32: style 0x%08lx (WS_POPUP, no OS caption), ex 0x%08lx", style,
+              ex_style);
     if (!impl_->hwnd) {
         return set_error(error, "CreateWindowExW failed: " +
                                     hresult_text(HRESULT_FROM_WIN32(GetLastError())));
@@ -537,6 +706,29 @@ bool Win32Display::should_close() const {
 
 const char* Win32Display::backend_name() const {
     return impl_->visible ? "win32" : "win32-headless";
+}
+
+bool Win32Display::needs_client_caption() const {
+    return impl_->visible && !impl_->fullscreen;
+}
+
+void Win32Display::set_client_caption(const ClientCaption& caption) {
+    impl_->caption = caption;
+    log::info("win32: client caption %.0f px, %.0f px buttons", caption.height,
+              caption.buttons_width);
+}
+
+void Win32Display::minimize_window() {
+    impl_->minimize();
+}
+
+void Win32Display::toggle_maximize_window() {
+    impl_->toggle_maximize();
+}
+
+void Win32Display::request_close() {
+    log::info("win32: close requested by the client caption");
+    impl_->request_quit();
 }
 
 void Win32Display::pump_messages() {

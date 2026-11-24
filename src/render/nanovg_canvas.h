@@ -2,6 +2,8 @@
 
 #include "render/canvas.h"
 
+#include <vector>
+
 struct NVGcontext;
 
 namespace pk {
@@ -14,6 +16,10 @@ public:
     void begin_frame(Size size, float dpi_scale) override;
     void end_frame() override;
     void flush() override;
+    void save() override;
+    void restore() override;
+    void translate(float dx, float dy) override;
+    void translation(float* x, float* y) const override;
 
     ImageHandle create_image(const std::uint8_t* rgba, int width, int height) override;
     void draw_image(ImageHandle image, Rect rect, float alpha) override;
@@ -33,11 +39,21 @@ public:
     void fill_path(const std::string& d, Rect view_box, Rect dest, Color color) override;
 
 private:
+    struct SavedTransform {
+        float x = 0.0f;
+        float y = 0.0f;
+    };
+
+    void apply_translation();
+
     NVGcontext* context_ = nullptr;
     Size size_;
     float dpi_scale_ = 1.0f;
     bool frame_open_ = false;
     bool bold_face_ = false;
+    float translate_x_ = 0.0f;
+    float translate_y_ = 0.0f;
+    std::vector<SavedTransform> transform_stack_;
 };
 
 }  // namespace pk

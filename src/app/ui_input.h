@@ -28,6 +28,9 @@ enum class UiAction {
     EchoMode,
     MicTest,
     SendDiagnostics,
+    WindowMinimize,
+    WindowMaximize,
+    WindowClose,
     Escape,
 };
 
@@ -114,6 +117,9 @@ struct UiActionHandlers {
     std::function<void(int)> echo_mode;
     std::function<void()> mic_test;
     std::function<void()> send_diagnostics;
+    std::function<void()> window_minimize;
+    std::function<void()> window_maximize;
+    std::function<void()> window_close;
 };
 
 // Returns true when a handler ran.

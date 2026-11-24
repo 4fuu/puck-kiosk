@@ -172,6 +172,9 @@ bool NanoVgCanvas::initialize(const std::string& font_path, std::string* error) 
 void NanoVgCanvas::begin_frame(Size size, float dpi_scale) {
     size_ = size;
     dpi_scale_ = dpi_scale;
+    translate_x_ = 0.0f;
+    translate_y_ = 0.0f;
+    transform_stack_.clear();
     nvgBeginFrame(context_, static_cast<float>(size.width), static_cast<float>(size.height), dpi_scale);
     frame_open_ = true;
 }
@@ -189,8 +192,62 @@ void NanoVgCanvas::flush() {
     }
     // End the frame to submit the queued 2D geometry, then start a fresh one.
     // Drawing state resets to default; every Canvas call sets its own state.
+    // The transform is ours, so put it back for the drawing after the flush.
     nvgEndFrame(context_);
     nvgBeginFrame(context_, static_cast<float>(size_.width), static_cast<float>(size_.height), dpi_scale_);
+    apply_translation();
+}
+
+void NanoVgCanvas::apply_translation() {
+    if (!context_) {
+        return;
+    }
+    nvgResetTransform(context_);
+    nvgTranslate(context_, translate_x_, translate_y_);
+}
+
+void NanoVgCanvas::save() {
+    if (!context_) {
+        return;
+    }
+    nvgSave(context_);
+    transform_stack_.push_back(SavedTransform{translate_x_, translate_y_});
+}
+
+void NanoVgCanvas::restore() {
+    if (!context_) {
+        return;
+    }
+    nvgRestore(context_);
+    if (!transform_stack_.empty()) {
+        translate_x_ = transform_stack_.back().x;
+        translate_y_ = transform_stack_.back().y;
+        transform_stack_.pop_back();
+    } else {
+        translate_x_ = 0.0f;
+        translate_y_ = 0.0f;
+    }
+    // A flush resets NanoVG's state stack; reapply our translation so restore
+    // lands in the same place whether or not the caller flushed.
+    apply_translation();
+}
+
+void NanoVgCanvas::translate(float dx, float dy) {
+    if (!context_) {
+        return;
+    }
+    nvgTranslate(context_, dx, dy);
+    translate_x_ += dx;
+    translate_y_ += dy;
+}
+
+void NanoVgCanvas::translation(float* x, float* y) const {
+    if (x) {
+        *x = translate_x_;
+    }
+    if (y) {
+        *y = translate_y_;
+    }
 }
 
 ImageHandle NanoVgCanvas::create_image(const std::uint8_t* rgba, int width, int height) {

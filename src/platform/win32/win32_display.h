@@ -24,6 +24,12 @@ public:
     bool should_close() const override;
     const char* backend_name() const override;
 
+    bool needs_client_caption() const override;
+    void set_client_caption(const ClientCaption& caption) override;
+    void minimize_window() override;
+    void toggle_maximize_window() override;
+    void request_close() override;
+
     // Drains the Win32 message queue. Input events are queued by the window
     // procedure and consumed with next_event().
     void pump_messages();

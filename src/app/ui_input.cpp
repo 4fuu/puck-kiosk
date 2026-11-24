@@ -115,6 +115,9 @@ const char* ui_action_name(UiAction action) {
         case UiAction::EchoMode: return "echo-mode";
         case UiAction::MicTest: return "mic-test";
         case UiAction::SendDiagnostics: return "send-diagnostics";
+        case UiAction::WindowMinimize: return "window-minimize";
+        case UiAction::WindowMaximize: return "window-maximize";
+        case UiAction::WindowClose: return "window-close";
         case UiAction::Escape: return "escape";
     }
     return "none";
@@ -429,6 +432,24 @@ bool dispatch_ui_action(UiAction action, int index, const UiActionHandlers& hand
         case UiAction::SendDiagnostics:
             if (handlers.send_diagnostics) {
                 handlers.send_diagnostics();
+                return true;
+            }
+            return false;
+        case UiAction::WindowMinimize:
+            if (handlers.window_minimize) {
+                handlers.window_minimize();
+                return true;
+            }
+            return false;
+        case UiAction::WindowMaximize:
+            if (handlers.window_maximize) {
+                handlers.window_maximize();
+                return true;
+            }
+            return false;
+        case UiAction::WindowClose:
+            if (handlers.window_close) {
+                handlers.window_close();
                 return true;
             }
             return false;

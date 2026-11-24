@@ -18,8 +18,18 @@ class PuckView;
 
 class CarUi {
 public:
+    // The client caption strip the app draws when the window has no OS title
+    // bar. It is chrome: the screen content is laid out in the area below it.
+    static constexpr float kCaptionHeight = 36.0f;
+    static constexpr float kCaptionButtonWidth = 40.0f;
+    static constexpr float kCaptionButtonHeight = 28.0f;
+    static constexpr float kCaptionRightMargin = 4.0f;
+    static constexpr float kCaptionButtonsWidth =
+        kCaptionButtonWidth * 3.0f + kCaptionRightMargin;
+
     explicit CarUi(PuckView& puck) : puck_(puck) {}
 
+    void set_client_caption(bool enabled) { client_caption_ = enabled; }
     void set_visual(const PuckVisual& visual) { visual_ = visual; }
     void set_pairing(const QrCode& qr, std::string title, std::string status, std::string code = {});
     void set_call(const CallView& view);
@@ -51,6 +61,7 @@ private:
     void draw_sheet(Canvas& canvas, Rect area, bool compact);
     void draw_debug(Canvas& canvas, Size size);
     void draw_focus_overlay(Canvas& canvas, Size size);
+    void draw_client_caption(Canvas& canvas, Size size);
     void add_debug_target(Canvas& canvas, Size size, bool pairing);
     void add_target(Rect rect, UiAction action, int index = -1);
     float control_split(float time_seconds, bool in_call);
@@ -72,6 +83,9 @@ private:
     Rect puck_stage_;
     UiFocusView focus_;
     bool hints_visible_ = false;
+    // Windowed Win32 has no OS title bar; the app draws this strip and the
+    // display reports pointer input in the content area below it.
+    bool client_caption_ = false;
     // The Debug entry stays invisible in normal use: hold the bottom-left
     // corner for 2s or tap it 5 times within 2.5s (pointer/touch), press F12,
     // or hold Back+Start on a gamepad for 1.5s. It hides again when the panel

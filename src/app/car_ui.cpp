@@ -680,6 +680,9 @@ std::string focus_hint_label(UiAction action, bool holding, bool muted) {
         case UiAction::MicTest: return "Test mic";
         case UiAction::SendDiagnostics: return "Send";
         case UiAction::None:
+        case UiAction::WindowMinimize:
+        case UiAction::WindowMaximize:
+        case UiAction::WindowClose:
         case UiAction::Escape:
             return {};
     }
@@ -942,7 +945,9 @@ float CarUi::control_split(float time_seconds, bool in_call) {
 }
 
 void CarUi::draw(Canvas& canvas, Size size, float time_seconds) {
-    last_size_ = size;
+    const int caption_height = client_caption_ ? static_cast<int>(kCaptionHeight) : 0;
+    const Size content{size.width, std::max(1, size.height - caption_height)};
+    last_size_ = content;
     last_draw_time_ = time_seconds;
     if (corner_holding_ && time_seconds - corner_hold_start_ >= 2.0f) {
         debug_revealed_ = true;
@@ -955,14 +960,57 @@ void CarUi::draw(Canvas& canvas, Size size, float time_seconds) {
     hits_.clear();
     puck_bounds_ = {};
     puck_stage_ = {};
-    if (debug_.open) {
-        draw_debug(canvas, size);
-    } else if (call_mode_) {
-        draw_call(canvas, size, time_seconds);
-    } else {
-        draw_pairing(canvas, size, time_seconds);
+    if (caption_height > 0) {
+        canvas.save();
+        canvas.translate(0.0f, static_cast<float>(caption_height));
     }
-    draw_focus_overlay(canvas, size);
+    if (debug_.open) {
+        draw_debug(canvas, content);
+    } else if (call_mode_) {
+        draw_call(canvas, content, time_seconds);
+    } else {
+        draw_pairing(canvas, content, time_seconds);
+    }
+    draw_focus_overlay(canvas, content);
+    if (caption_height > 0) {
+        canvas.restore();
+        draw_client_caption(canvas, size);
+    }
+}
+
+void CarUi::draw_client_caption(Canvas& canvas, Size size) {
+    canvas.fill_rect(Rect{0.0f, 0.0f, static_cast<float>(size.width), kCaptionHeight},
+                     kBackground);
+    const TextStyle title_style =
+        type(13.0f, kMuted, TextAlign::Left, FontWeight::Medium);
+    canvas.text(16.0f, kCaptionHeight * 0.5f, title_style, "Puck Kiosk");
+
+    const float button_y = (kCaptionHeight - kCaptionButtonHeight) * 0.5f;
+    const float right = static_cast<float>(size.width) - kCaptionRightMargin;
+    const Rect close{right - kCaptionButtonWidth, button_y, kCaptionButtonWidth,
+                     kCaptionButtonHeight};
+    const Rect maximize{close.x - kCaptionButtonWidth, button_y, kCaptionButtonWidth,
+                        kCaptionButtonHeight};
+    const Rect minimize{maximize.x - kCaptionButtonWidth, button_y, kCaptionButtonWidth,
+                        kCaptionButtonHeight};
+    constexpr float kIconSize = 18.0f;
+    const auto draw_icon = [&](const char* path, Rect rect) {
+        canvas.fill_path(path, kIconBox,
+                         icon_rect(rect.center_x(), rect.center_y(), kIconSize), kMuted);
+    };
+    draw_icon(icons::kMinimize, minimize);
+    draw_icon(icons::kMaximize, maximize);
+    draw_icon(icons::kClose, close);
+
+    // Pointer input is in content space, so the strip sits just above y=0.
+    hits_.add(Rect{0.0f, -kCaptionHeight, static_cast<float>(size.width), kCaptionHeight},
+              UiAction::None);
+    hits_.add(Rect{minimize.x, minimize.y - kCaptionHeight, minimize.w, minimize.h},
+              UiAction::WindowMinimize);
+    hits_.add(Rect{maximize.x, maximize.y - kCaptionHeight, maximize.w, maximize.h},
+              UiAction::WindowMaximize);
+    hits_.add(Rect{close.x, close.y - kCaptionHeight, close.w, close.h},
+              UiAction::WindowClose);
 }
 
 void CarUi::draw_pairing(Canvas& canvas, Size size, float time_seconds) {

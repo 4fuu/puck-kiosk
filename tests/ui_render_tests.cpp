@@ -56,7 +56,7 @@ struct InkBounds {
     int pixels = 0;
 };
 
-InkBounds ink_bounds(const Image& image, const pk::Rect& rect) {
+InkBounds ink_bounds(const Image& image, const pk::Rect& rect, int threshold = 140) {
     InkBounds bounds;
     const int x0 = std::max(0, static_cast<int>(std::floor(rect.x)));
     const int y0 = std::max(0, static_cast<int>(std::floor(rect.y)));
@@ -71,8 +71,9 @@ InkBounds ink_bounds(const Image& image, const pk::Rect& rect) {
             const int blue = image.rgb[index + 2];
             // The option fill is #2f372f (about 55 luma) and the label is
             // #f6fff5 (about 250). Anti-aliased glyph edges cross the midpoint.
+            // The caption's 1px minimize bar needs a lower threshold.
             const int luma = (red * 299 + green * 587 + blue * 114) / 1000;
-            if (luma < 140) {
+            if (luma < threshold) {
                 continue;
             }
             if (!bounds.found) {
@@ -89,6 +90,23 @@ InkBounds ink_bounds(const Image& image, const pk::Rect& rect) {
         }
     }
     return bounds;
+}
+
+struct Rgb {
+    int r = 0;
+    int g = 0;
+    int b = 0;
+};
+
+Rgb pixel_at(const Image& image, int x, int y) {
+    const std::size_t index =
+        (static_cast<std::size_t>(y) * image.width + static_cast<std::size_t>(x)) * 3;
+    return Rgb{image.rgb[index], image.rgb[index + 1], image.rgb[index + 2]};
+}
+
+bool is_background(Rgb color) {
+    // #0b0d0b, the app background token in car_ui.cpp.
+    return color.r == 0x0b && color.g == 0x0d && color.b == 0x0b;
 }
 
 int fail(const std::string& message) {
@@ -194,6 +212,111 @@ int main() {
         ++failures;
     } else {
         std::printf("PASS: muted call shows its caption\n");
+    }
+
+    // Client caption chrome: windowed Win32 has no OS title bar, so the app
+    // draws this strip and translates the screen content below it.
+    ui.set_client_caption(true);
+    ui.set_sheet({});
+    pk::CallView active;
+    active.phase = pk::CallPhase::Active;
+    active.caption = "On a call with Puck";
+    ui.set_call(active);
+    renderer.begin(display.size(), display.dpi_scale());
+    ui.draw(renderer.canvas(), display.size(), 2.0f);
+    renderer.end();
+    display.swap();
+    if (!read_ppm(output, &image)) {
+        return fail("cannot read the client-caption frame");
+    }
+
+    int caption_background_failures = 0;
+    for (int y = 2; y <= 34; ++y) {
+        for (int x = 200; x <= 1100; ++x) {
+            if (!is_background(pixel_at(image, x, y))) {
+                if (caption_background_failures == 0) {
+                    const Rgb color = pixel_at(image, x, y);
+                    std::fprintf(stderr, "caption background is %d,%d,%d at %d,%d\n",
+                                 color.r, color.g, color.b, x, y);
+                }
+                ++caption_background_failures;
+            }
+        }
+    }
+    if (caption_background_failures != 0) {
+        std::fprintf(stderr, "caption background mismatched %d pixels\n",
+                     caption_background_failures);
+        ++failures;
+    } else {
+        std::printf("PASS: client caption background is exactly #0b0d0b\n");
+    }
+
+    const pk::Rect title_rect{8.0f, 4.0f, 160.0f, 28.0f};
+    const InkBounds title_ink = ink_bounds(image, title_rect);
+    if (!title_ink.found || title_ink.pixels < 20) {
+        std::fprintf(stderr, "client caption title drew no ink\n");
+        ++failures;
+    } else if (title_ink.min_x < 8 || title_ink.min_x > 40) {
+        std::fprintf(stderr, "client caption title is not left-aligned: x %d..%d\n",
+                     title_ink.min_x, title_ink.max_x);
+        ++failures;
+    } else {
+        std::printf("PASS: client caption title ink is left-aligned\n");
+    }
+
+    // The call header's "amp" mark sits at y=48 in the 720px layout; the
+    // caption translation must move it down to about y=84, not leave it in the
+    // strip's band.
+    const InkBounds header_ink =
+        ink_bounds(image, pk::Rect{24.0f, 36.0f, 120.0f, 80.0f});
+    if (!header_ink.found || header_ink.min_y < 60) {
+        std::fprintf(stderr, "client caption did not translate the screen content\n");
+        ++failures;
+    } else {
+        std::printf("PASS: screen content starts below the client caption\n");
+    }
+
+    const float button_y =
+        (pk::CarUi::kCaptionHeight - pk::CarUi::kCaptionButtonHeight) * 0.5f;
+    const float right = 1280.0f - pk::CarUi::kCaptionRightMargin;
+    const pk::Rect close_rect{right - pk::CarUi::kCaptionButtonWidth, button_y,
+                              pk::CarUi::kCaptionButtonWidth, pk::CarUi::kCaptionButtonHeight};
+    const pk::Rect maximize_rect{close_rect.x - pk::CarUi::kCaptionButtonWidth, button_y,
+                                 pk::CarUi::kCaptionButtonWidth,
+                                 pk::CarUi::kCaptionButtonHeight};
+    const pk::Rect minimize_rect{maximize_rect.x - pk::CarUi::kCaptionButtonWidth, button_y,
+                                 pk::CarUi::kCaptionButtonWidth,
+                                 pk::CarUi::kCaptionButtonHeight};
+    const InkBounds close_ink = ink_bounds(image, close_rect, 90);
+    const InkBounds maximize_ink = ink_bounds(image, maximize_rect, 90);
+    const InkBounds minimize_ink = ink_bounds(image, minimize_rect, 90);
+    const bool buttons_ink =
+        close_ink.found && maximize_ink.found && minimize_ink.found &&
+        close_ink.pixels >= 10 && maximize_ink.pixels >= 10 && minimize_ink.pixels >= 10;
+    if (!buttons_ink) {
+        std::fprintf(stderr, "client caption buttons drew no ink\n");
+        ++failures;
+    } else if (!(close_ink.max_x > maximize_ink.max_x &&
+                 maximize_ink.max_x > minimize_ink.max_x) ||
+               close_ink.max_x > 1280 - 4) {
+        std::fprintf(stderr, "client caption buttons are not right-aligned\n");
+        ++failures;
+    } else {
+        std::printf("PASS: client caption buttons are right-aligned\n");
+    }
+    if (buttons_ink) {
+        const float close_center =
+            (static_cast<float>(close_ink.min_x) + close_ink.max_x) * 0.5f;
+        const float maximize_center =
+            (static_cast<float>(maximize_ink.min_x) + maximize_ink.max_x) * 0.5f;
+        const float minimize_center =
+            (static_cast<float>(minimize_ink.min_x) + minimize_ink.max_x) * 0.5f;
+        if (std::fabs(close_center - close_rect.center_x()) > 3.0f ||
+            std::fabs(maximize_center - maximize_rect.center_x()) > 3.0f ||
+            std::fabs(minimize_center - minimize_rect.center_x()) > 3.0f) {
+            std::fprintf(stderr, "client caption icons are not centered in their buttons\n");
+            ++failures;
+        }
     }
 
     if (failures == 0) {

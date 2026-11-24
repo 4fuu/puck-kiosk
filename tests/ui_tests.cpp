@@ -254,6 +254,9 @@ void test_dispatch() {
     int option = -1;
     int echo = -1;
     int passkey = 0;
+    int window_minimize = 0;
+    int window_maximize = 0;
+    int window_close = 0;
     pk::UiActionHandlers handlers;
     handlers.call = [&]() { ++call; };
     handlers.mute = [&]() { ++mute; };
@@ -262,6 +265,9 @@ void test_dispatch() {
     handlers.sheet_option = [&](int index) { option = index; };
     handlers.echo_mode = [&](int index) { echo = index; };
     handlers.passkey_confirm = [&]() { ++passkey; };
+    handlers.window_minimize = [&]() { ++window_minimize; };
+    handlers.window_maximize = [&]() { ++window_maximize; };
+    handlers.window_close = [&]() { ++window_close; };
 
     CHECK(pk::dispatch_ui_action(pk::UiAction::Call, -1, handlers));
     CHECK(pk::dispatch_ui_action(pk::UiAction::Mute, -1, handlers));
@@ -270,8 +276,12 @@ void test_dispatch() {
     CHECK(pk::dispatch_ui_action(pk::UiAction::SheetOption, 2, handlers));
     CHECK(pk::dispatch_ui_action(pk::UiAction::EchoMode, 1, handlers));
     CHECK(pk::dispatch_ui_action(pk::UiAction::PasskeyConfirm, -1, handlers));
+    CHECK(pk::dispatch_ui_action(pk::UiAction::WindowMinimize, -1, handlers));
+    CHECK(pk::dispatch_ui_action(pk::UiAction::WindowMaximize, -1, handlers));
+    CHECK(pk::dispatch_ui_action(pk::UiAction::WindowClose, -1, handlers));
     CHECK(call == 1 && mute == 1 && end == 1 && media_close == 1);
     CHECK(option == 2 && echo == 1 && passkey == 1);
+    CHECK(window_minimize == 1 && window_maximize == 1 && window_close == 1);
     CHECK(!pk::dispatch_ui_action(pk::UiAction::None, -1, handlers));
     CHECK(!pk::dispatch_ui_action(pk::UiAction::Escape, -1, handlers));
     CHECK(!pk::dispatch_ui_action(pk::UiAction::MicTest, -1, handlers));
@@ -859,6 +869,108 @@ void test_hint_visibility() {
     CHECK(!ui.hints_visible());
 }
 
+void test_client_caption() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+    pk::CallView view;
+    view.phase = pk::CallPhase::Active;
+    view.caption = "On a call with Puck";
+    ui.set_call(view);
+
+    // The caption is opt-in; headless and fullscreen keep the old hit map.
+    ui.draw(canvas, pk::Size{1280, 720}, 0.0f);
+    CHECK(find_target(ui.hit_map(), pk::UiAction::WindowClose) == nullptr);
+    CHECK(ui.hit_map().hit(640.0f, -18.0f) == nullptr);
+
+    ui.set_client_caption(true);
+    ui.draw(canvas, pk::Size{1280, 720}, 0.0f);
+    const pk::UiTarget* close = find_target(ui.hit_map(), pk::UiAction::WindowClose);
+    const pk::UiTarget* maximize = find_target(ui.hit_map(), pk::UiAction::WindowMaximize);
+    const pk::UiTarget* minimize = find_target(ui.hit_map(), pk::UiAction::WindowMinimize);
+    CHECK(close != nullptr);
+    CHECK(maximize != nullptr);
+    CHECK(minimize != nullptr);
+    if (!close || !maximize || !minimize) {
+        return;
+    }
+    // Buttons are 40x28 and right-aligned, in content space above y=0.
+    CHECK(std::fabs(close->rect.w - pk::CarUi::kCaptionButtonWidth) < 0.01f);
+    CHECK(std::fabs(close->rect.h - pk::CarUi::kCaptionButtonHeight) < 0.01f);
+    CHECK(std::fabs(close->rect.y + pk::CarUi::kCaptionHeight -
+                    (pk::CarUi::kCaptionHeight - pk::CarUi::kCaptionButtonHeight) * 0.5f) <
+          0.01f);
+    CHECK(close->rect.x > maximize->rect.x);
+    CHECK(maximize->rect.x > minimize->rect.x);
+    CHECK(std::fabs(close->rect.x + close->rect.w -
+                    (1280.0f - pk::CarUi::kCaptionRightMargin)) < 0.01f);
+    CHECK(close->rect.x + close->rect.w <= 1280.0f);
+
+    // The empty strip is a blocker; each button center is its own action.
+    const pk::UiTarget* blocker = ui.hit_map().hit(640.0f, -18.0f);
+    CHECK(blocker != nullptr);
+    CHECK(blocker && blocker->action == pk::UiAction::None);
+    CHECK(ui.hit_map().hit(close->rect.center_x(), -18.0f)->action ==
+          pk::UiAction::WindowClose);
+    CHECK(ui.hit_map().hit(maximize->rect.center_x(), -18.0f)->action ==
+          pk::UiAction::WindowMaximize);
+    CHECK(ui.hit_map().hit(minimize->rect.center_x(), -18.0f)->action ==
+          pk::UiAction::WindowMinimize);
+
+    // A click on the strip never reaches the Puck; a button click emits one
+    // window action through the normal router.
+    pk::UiInputRouter router;
+    router.set_hit_map(&ui.hit_map());
+    router.handle(pointer(pk::InputEvent::Type::PointerDown, 640.0f, -18.0f));
+    CHECK(router.handle(pointer(pk::InputEvent::Type::PointerUp, 640.0f, -18.0f)) ==
+          pk::UiAction::None);
+    router.handle(pointer(pk::InputEvent::Type::PointerDown, close->rect.center_x(), -18.0f));
+    CHECK(router.handle(pointer(pk::InputEvent::Type::PointerUp, close->rect.center_x(),
+                                -18.0f)) == pk::UiAction::WindowClose);
+
+    // Screen targets stay below the strip, so a Puck grab at y=-18 cannot
+    // reach them.
+    const pk::UiTarget* mute = find_target(ui.hit_map(), pk::UiAction::Mute);
+    CHECK(mute != nullptr);
+    CHECK(mute && mute->rect.y >= 0.0f);
+
+    // Gamepad focus skips the pointer-only window controls.
+    pk::UiFocus focus;
+    focus.set_hit_map(&ui.hit_map());
+    focus.sync();
+    for (int i = 0; i < 12; ++i) {
+        focus.handle(gamepad_button(pk::InputEvent::GamepadButton::DPadRight, true),
+                     0.1f * static_cast<float>(i));
+        focus.handle(gamepad_button(pk::InputEvent::GamepadButton::DPadRight, false),
+                     0.1f * static_cast<float>(i) + 0.01f);
+        const pk::UiAction action = focus.focused_action();
+        CHECK(action != pk::UiAction::WindowMinimize);
+        CHECK(action != pk::UiAction::WindowMaximize);
+        CHECK(action != pk::UiAction::WindowClose);
+    }
+
+    // The hidden Debug corner stays at the bottom-left of the content, which is
+    // the bottom-left of the window.
+    for (int i = 0; i < 5; ++i) {
+        pk::InputEvent tap;
+        tap.type = pk::InputEvent::Type::PointerDown;
+        tap.x = 20.0f;
+        tap.y = 720.0f - pk::CarUi::kCaptionHeight - 20.0f;
+        ui.notify_input(tap);
+        tap.type = pk::InputEvent::Type::PointerUp;
+        ui.notify_input(tap);
+        ui.draw(canvas, pk::Size{1280, 720},
+                0.1f + 0.1f * static_cast<float>(i));
+    }
+    CHECK(find_target(ui.hit_map(), pk::UiAction::DebugOpen) != nullptr);
+
+    CHECK(std::string(pk::ui_action_name(pk::UiAction::WindowMinimize)) ==
+          "window-minimize");
+    CHECK(std::string(pk::ui_action_name(pk::UiAction::WindowMaximize)) ==
+          "window-maximize");
+    CHECK(std::string(pk::ui_action_name(pk::UiAction::WindowClose)) == "window-close");
+}
+
 void test_gamepad_script() {
     const std::string text = R"([
         {"t": 0.3, "type": "gamepad", "axis": "left_x", "value": 0.75},
@@ -911,6 +1023,7 @@ int main() {
     test_focus_actions();
     test_focus_occlusion();
     test_hint_visibility();
+    test_client_caption();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

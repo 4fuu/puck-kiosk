@@ -234,6 +234,14 @@ void dump_targets(const UiHitMap& hits) {
     }
 }
 
+// Every screen shares the client caption's window controls. A backend with no
+// client caption keeps the Display no-ops.
+void add_window_handlers(UiActionHandlers* handlers, Display* display) {
+    handlers->window_minimize = [display]() { display->minimize_window(); };
+    handlers->window_maximize = [display]() { display->toggle_maximize_window(); };
+    handlers->window_close = [display]() { display->request_close(); };
+}
+
 struct ScriptHooks {
     UiInputRouter* router = nullptr;
     UiFocus* focus = nullptr;
@@ -631,6 +639,7 @@ int run_demo_screen(const AppOptions& options, Platform& platform, Renderer& ren
         std::string error;
         diagnostics.send(&error);
     };
+    add_window_handlers(&handlers, platform.display.get());
 
     UiInputRouter router;
     router.set_hit_map(&ui.hit_map());
@@ -820,6 +829,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         std::string send_error;
         diagnostics.send(&send_error);
     };
+    add_window_handlers(&debug_handlers, platform.display.get());
 
     auto sync_pairing = [&]() {
         puck_interaction.set_bounds(ui.puck_bounds(), ui.puck_stage());
@@ -1305,6 +1315,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         std::string send_error;
         diagnostics.send(&send_error);
     };
+    add_window_handlers(&handlers, platform.display.get());
 
     auto dismiss_car_overlay = [&]() -> bool {
         if (diagnostics.is_open()) {
@@ -1699,6 +1710,11 @@ int App::run(const AppOptions& options) {
     log::info("Puck renderer: %s", puck->name());
 
     CarUi ui(*puck);
+    if (platform->display->needs_client_caption()) {
+        ui.set_client_caption(true);
+        platform->display->set_client_caption(
+            ClientCaption{CarUi::kCaptionHeight, CarUi::kCaptionButtonsWidth});
+    }
     MediaOverlay media(platform->http.get(), PairingOptions{}.origin, renderer.canvas());
     ui.set_media(&media);
 
@@ -1734,6 +1750,7 @@ int App::run(const AppOptions& options) {
     const auto started = std::chrono::steady_clock::now();
     bool running = true;
     UiInputRouter router;
+    router.set_hit_map(&ui.hit_map());
     UiFocus focus;
     focus.set_hit_map(&ui.hit_map());
     PuckInteraction puck_interaction;
@@ -1749,6 +1766,7 @@ int App::run(const AppOptions& options) {
         std::string mic_error;
         diagnostics.run_mic_test(platform->audio.get(), &mic_error);
     };
+    add_window_handlers(&handlers, platform->display.get());
     auto dismiss_overlay = [&]() -> bool {
         if (diagnostics.is_open()) {
             diagnostics.close();
