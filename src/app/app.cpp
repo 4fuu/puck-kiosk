@@ -7,6 +7,7 @@
 #include "app/pairing.h"
 #include "app/passkey.h"
 #include "app/plugin_ui.h"
+#include "app/ui_focus.h"
 #include "app/ui_input.h"
 #include "core/log.h"
 #include "platform/audio.h"
@@ -234,18 +235,90 @@ void dump_targets(const UiHitMap& hits) {
 
 struct ScriptHooks {
     UiInputRouter* router = nullptr;
+    UiFocus* focus = nullptr;
     UiActionHandlers handlers;
     std::function<void()> refresh;
     std::function<bool()> escape;
+    std::function<bool()> dismiss;
+    std::function<void()> toggle_debug;
+    std::function<void(const InputEvent&)> observe;
+    float* clock = nullptr;
 };
 
+// Runs an action the focus layer produced through the same handlers as a
+// pointer click. `changed` marks the screen dirty or re-renders it.
+bool apply_focus_result(const UiFocusResult& result, const UiActionHandlers& handlers,
+                        const std::function<bool()>& dismiss,
+                        const std::function<void()>& toggle_debug,
+                        const std::function<void()>& changed) {
+    if (result.dismiss) {
+        if (dismiss && dismiss() && changed) {
+            changed();
+        }
+        return true;
+    }
+    if (result.toggle_debug) {
+        if (toggle_debug) {
+            toggle_debug();
+        }
+        if (changed) {
+            changed();
+        }
+        return true;
+    }
+    if (result.action != UiAction::None) {
+        if (dispatch_ui_action(result.action, result.index, handlers) && changed) {
+            changed();
+        }
+        return true;
+    }
+    return result.consumed;
+}
+
+std::string focus_label(const UiFocus& focus) {
+    if (!focus.focused()) {
+        return "none";
+    }
+    const int index = focus.focused_index();
+    const std::string name = ui_action_name(focus.focused_action());
+    return index >= 0 ? name + "[" + std::to_string(index) + "]" : name;
+}
+
 // Applies scripted events against the hit map from the previous render, then
-// refreshes so the next event sees the new screen.
+// refreshes so the next event sees the new screen. Gamepad events go through
+// UiFocus first; pointer events that do not start an End hold fall through to
+// the pointer router unchanged.
 bool apply_input_script(const std::vector<ScriptedInput>& script, const ScriptHooks& hooks) {
     if (!hooks.router) {
         return false;
     }
     for (const ScriptedInput& entry : script) {
+        const float now = static_cast<float>(entry.t);
+        if (hooks.clock) {
+            *hooks.clock = now;
+        }
+        if (hooks.observe) {
+            hooks.observe(entry.event);
+        }
+        if (hooks.focus) {
+            const std::string before = focus_label(*hooks.focus);
+            const UiFocusResult hold = hooks.focus->update(now);
+            if (hold.action != UiAction::None) {
+                log::info("input: %s hold at t=%.2f", ui_action_name(hold.action), entry.t);
+                apply_focus_result(hold, hooks.handlers, hooks.dismiss, hooks.toggle_debug,
+                                   hooks.refresh);
+            }
+            const UiFocusResult result = hooks.focus->handle(entry.event, now);
+            const bool consumed = apply_focus_result(
+                result, hooks.handlers, hooks.dismiss, hooks.toggle_debug, hooks.refresh);
+            const std::string after = focus_label(*hooks.focus);
+            if (after != before) {
+                log::info("input: focus %s at t=%.2f", after.c_str(), entry.t);
+            }
+            if (consumed) {
+                continue;
+            }
+        }
         int index = -1;
         const UiAction action = hooks.router->handle(entry.event, &index);
         if (action == UiAction::Escape) {
@@ -435,6 +508,10 @@ int run_demo_screen(const AppOptions& options, Platform& platform, Renderer& ren
     visual.not_listening = view.muted;
     visual.mouth = view.mouth;
 
+    UiFocus focus;
+    focus.set_hit_map(&ui.hit_map());
+    float demo_time = 0.0f;
+
     if (!options.demo_plugin.empty()) {
         std::string plugin_text;
         std::string error;
@@ -475,9 +552,12 @@ int run_demo_screen(const AppOptions& options, Platform& platform, Renderer& ren
     auto render = [&](bool present) {
         platform.display->make_current();
         media.poll();
+        focus.sync();
+        ui.set_focus(focus.view(demo_time, ui.hints_visible()));
         renderer.begin(platform.display->size(), platform.display->dpi_scale());
-        ui.draw(renderer.canvas(), platform.display->size(), 0.0f);
+        ui.draw(renderer.canvas(), platform.display->size(), demo_time);
         renderer.end();
+        focus.sync();
         if (present) {
             platform.display->swap();
         }
@@ -540,8 +620,31 @@ int run_demo_screen(const AppOptions& options, Platform& platform, Renderer& ren
 
     UiInputRouter router;
     router.set_hit_map(&ui.hit_map());
+    auto dismiss_overlay = [&]() -> bool {
+        if (diagnostics.is_open()) {
+            diagnostics.close();
+            return true;
+        }
+        if (plugins.visible()) {
+            plugins.dismiss();
+            return true;
+        }
+        if (media.visible()) {
+            media.close();
+            return true;
+        }
+        return false;
+    };
+    auto toggle_debug = [&]() {
+        if (diagnostics.is_open()) {
+            diagnostics.close();
+        } else {
+            diagnostics.open();
+        }
+    };
     ScriptHooks hooks;
     hooks.router = &router;
+    hooks.focus = &focus;
     hooks.handlers = handlers;
     hooks.refresh = [&]() {
         sync();
@@ -551,31 +654,23 @@ int run_demo_screen(const AppOptions& options, Platform& platform, Renderer& ren
         }
     };
     hooks.escape = [&]() {
-        if (diagnostics.is_open()) {
-            diagnostics.close();
-            sync();
-            render(false);
-            return false;
-        }
-        if (plugins.visible()) {
-            plugins.dismiss();
-            sync();
-            render(false);
-            return false;
-        }
-        if (media.visible()) {
-            media.close();
+        if (dismiss_overlay()) {
             sync();
             render(false);
             return false;
         }
         return true;
     };
+    hooks.dismiss = dismiss_overlay;
+    hooks.toggle_debug = toggle_debug;
+    hooks.observe = [&](const InputEvent& event) { ui.notify_input(event); };
+    hooks.clock = &demo_time;
     apply_input_script(options.input_script, hooks);
 
     sync();
     render(true);
-    log::info("demo: call=%s media=%s", view.caption.c_str(), media.status_text().c_str());
+    log::info("demo: call=%s media=%s focus=%s", view.caption.c_str(),
+              media.status_text().c_str(), focus_label(focus).c_str());
     return 0;
 }
 
@@ -654,12 +749,20 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
     auto elapsed_seconds = [&]() {
         return std::chrono::duration<float>(Clock::now() - started).count();
     };
+    UiFocus focus;
+    focus.set_hit_map(&ui.hit_map());
+    float script_time = 0.0f;
+    bool use_script_time = false;
+    auto ui_time = [&]() { return use_script_time ? script_time : elapsed_seconds(); };
     auto render = [&](bool present) {
         platform.display->make_current();
         media.poll();
+        focus.sync();
+        ui.set_focus(focus.view(ui_time(), ui.hints_visible()));
         renderer.begin(platform.display->size(), platform.display->dpi_scale());
-        ui.draw(renderer.canvas(), platform.display->size(), elapsed_seconds());
+        ui.draw(renderer.canvas(), platform.display->size(), ui_time());
         renderer.end();
+        focus.sync();
         if (present) {
             platform.display->swap();
         }
@@ -692,9 +795,48 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         ui.set_passkey(PasskeyView{});
         ui.set_debug(diagnostics.view());
     };
+    auto dismiss_overlay = [&]() -> bool {
+        if (diagnostics.is_open()) {
+            diagnostics.close();
+            return true;
+        }
+        return false;
+    };
+    auto toggle_debug = [&]() {
+        if (diagnostics.is_open()) {
+            diagnostics.close();
+        } else {
+            diagnostics.open();
+        }
+    };
     auto poll_debug_input = [&]() {
+        const UiFocusResult hold = focus.update(elapsed_seconds());
+        if (hold.action != UiAction::None) {
+            apply_focus_result(hold, debug_handlers, dismiss_overlay, toggle_debug,
+                               [&]() { dirty = true; });
+        }
         InputEvent event;
         while (platform.input && platform.input->poll(event)) {
+            const bool hints_before = ui.hints_visible();
+            ui.notify_input(event);
+            if (hints_before != ui.hints_visible()) {
+                dirty = true;
+            }
+            const float now = elapsed_seconds();
+            const std::string before = focus_label(focus);
+            const UiFocusResult focus_result = focus.handle(event, now);
+            const bool consumed = apply_focus_result(
+                focus_result, debug_handlers, dismiss_overlay, toggle_debug,
+                [&]() { dirty = true; });
+            const std::string after = focus_label(focus);
+            if (after != before) {
+                log::info("pairing: focus %s", after.c_str());
+                dirty = true;
+            }
+            if (consumed) {
+                continue;
+            }
+
             int index = -1;
             const UiAction action = router.handle(event, &index);
             if (action == UiAction::Escape) {
@@ -738,8 +880,10 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         }
     }
     if (!options.input_script.empty()) {
+        use_script_time = true;
         ScriptHooks hooks;
         hooks.router = &router;
+        hooks.focus = &focus;
         hooks.handlers = debug_handlers;
         hooks.refresh = [&]() {
             sync_pairing();
@@ -749,21 +893,30 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
             }
         };
         hooks.escape = [&]() {
-            if (diagnostics.is_open()) {
-                diagnostics.close();
+            if (dismiss_overlay()) {
                 sync_pairing();
                 render(true);
                 return false;
             }
             return true;
         };
+        hooks.dismiss = dismiss_overlay;
+        hooks.toggle_debug = toggle_debug;
+        hooks.observe = [&](const InputEvent& event) { ui.notify_input(event); };
+        hooks.clock = &script_time;
         if (apply_input_script(options.input_script, hooks)) {
             return 0;
         }
         if (options.exit_after_script) {
+            sync_pairing();
+            render(true);
+            if (options.dump_targets) {
+                dump_targets(ui.hit_map());
+            }
             log::info("input script finished; leaving the pairing screen");
             return 0;
         }
+        use_script_time = false;
     }
 
     int generation = pairing.challenge_generation();
@@ -1091,6 +1244,32 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         diagnostics.send(&send_error);
     };
 
+    auto dismiss_car_overlay = [&]() -> bool {
+        if (diagnostics.is_open()) {
+            diagnostics.close();
+            return true;
+        }
+        if (plugins.visible()) {
+            plugins.dismiss();
+            return true;
+        }
+        if (media.visible()) {
+            media.close();
+            return true;
+        }
+        return false;
+    };
+    auto toggle_car_debug = [&]() {
+        if (diagnostics.is_open()) {
+            diagnostics.close();
+        } else {
+            diagnostics.open();
+        }
+    };
+
+    // Pairing left focus on its Debug entry; the call screen starts fresh.
+    focus.reset();
+
     auto handle_actor_message = [&](const std::string& message) {
         if (message == "pong") {
             return;
@@ -1139,6 +1318,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
     };
 
     if (!options.input_script.empty()) {
+        use_script_time = true;
         update_passkey_context();
         sync_car();
         render(false);
@@ -1147,6 +1327,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         }
         ScriptHooks hooks;
         hooks.router = &router;
+        hooks.focus = &focus;
         hooks.handlers = handlers;
         hooks.refresh = [&]() {
             update_passkey_context();
@@ -1157,26 +1338,17 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
             }
         };
         hooks.escape = [&]() {
-            if (diagnostics.is_open()) {
-                diagnostics.close();
-                sync_car();
-                render(false);
-                return false;
-            }
-            if (plugins.visible()) {
-                plugins.dismiss();
-                sync_car();
-                render(false);
-                return false;
-            }
-            if (media.visible()) {
-                media.close();
+            if (dismiss_car_overlay()) {
                 sync_car();
                 render(false);
                 return false;
             }
             return true;
         };
+        hooks.dismiss = dismiss_car_overlay;
+        hooks.toggle_debug = toggle_car_debug;
+        hooks.observe = [&](const InputEvent& event) { ui.notify_input(event); };
+        hooks.clock = &script_time;
         if (apply_input_script(options.input_script, hooks)) {
             quit = true;
         }
@@ -1192,6 +1364,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
             reader.stop();
             return 0;
         }
+        use_script_time = false;
     }
 
     bool running = !quit;
@@ -1211,8 +1384,35 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
             break;
         }
 
+        const UiFocusResult hold = focus.update(elapsed_seconds());
+        if (hold.action != UiAction::None) {
+            apply_focus_result(hold, handlers, dismiss_car_overlay, toggle_car_debug,
+                               [&]() { car_dirty = true; });
+        }
+
         InputEvent event;
         while (platform.input && platform.input->poll(event)) {
+            const bool hints_before = ui.hints_visible();
+            ui.notify_input(event);
+            if (hints_before != ui.hints_visible()) {
+                car_dirty = true;
+            }
+            const float now = elapsed_seconds();
+            const std::string before = focus_label(focus);
+            const UiFocusResult focus_result = focus.handle(event, now);
+            const bool consumed = apply_focus_result(
+                focus_result, handlers, dismiss_car_overlay, toggle_car_debug,
+                [&]() { car_dirty = true; });
+            const std::string after = focus_label(focus);
+            if (after != before) {
+                log::info("car: focus %s", after.c_str());
+                car_dirty = true;
+            }
+            if (consumed) {
+                car_dirty = true;
+                continue;
+            }
+
             int index = -1;
             const UiAction action = router.handle(event, &index);
             if (action == UiAction::Escape) {
@@ -1311,6 +1511,11 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
             }
         }
         update_passkey_context();
+
+        if (focus.hold_active() &&
+            Clock::now() - last_car_render >= std::chrono::milliseconds(33)) {
+            car_dirty = true;
+        }
 
         const bool headless = std::string(platform.display->backend_name()) == "headless";
         const auto interval = call && call->active()
@@ -1452,6 +1657,8 @@ int App::run(const AppOptions& options) {
     const auto started = std::chrono::steady_clock::now();
     bool running = true;
     UiInputRouter router;
+    UiFocus focus;
+    focus.set_hit_map(&ui.hit_map());
     UiActionHandlers handlers;
     handlers.debug_open = [&]() { diagnostics.open(); };
     handlers.debug_close = [&]() { diagnostics.close(); };
@@ -1464,10 +1671,37 @@ int App::run(const AppOptions& options) {
         std::string mic_error;
         diagnostics.run_mic_test(platform->audio.get(), &mic_error);
     };
+    auto dismiss_overlay = [&]() -> bool {
+        if (diagnostics.is_open()) {
+            diagnostics.close();
+            return true;
+        }
+        return false;
+    };
+    auto toggle_debug = [&]() {
+        if (diagnostics.is_open()) {
+            diagnostics.close();
+        } else {
+            diagnostics.open();
+        }
+    };
 
     while (running && !platform->display->should_close()) {
+        const float elapsed =
+            std::chrono::duration<float>(std::chrono::steady_clock::now() - started).count();
+        const UiFocusResult hold = focus.update(elapsed);
+        if (hold.action != UiAction::None) {
+            apply_focus_result(hold, handlers, dismiss_overlay, toggle_debug, nullptr);
+        }
         InputEvent event;
         while (platform->input && platform->input->poll(event)) {
+            ui.notify_input(event);
+            const UiFocusResult focus_result = focus.handle(event, elapsed);
+            if (apply_focus_result(focus_result, handlers, dismiss_overlay, toggle_debug,
+                                   nullptr)) {
+                continue;
+            }
+
             int index = -1;
             const UiAction action = router.handle(event, &index);
             if (action == UiAction::Escape) {
@@ -1490,11 +1724,12 @@ int App::run(const AppOptions& options) {
         ui.set_debug(diagnostics.view());
         platform->display->make_current();
         media.poll();
+        focus.sync();
+        ui.set_focus(focus.view(elapsed, ui.hints_visible()));
         renderer.begin(platform->display->size(), platform->display->dpi_scale());
-        const float elapsed =
-            std::chrono::duration<float>(std::chrono::steady_clock::now() - started).count();
         ui.draw(renderer.canvas(), platform->display->size(), elapsed);
         renderer.end();
+        focus.sync();
         platform->display->swap();
         std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }

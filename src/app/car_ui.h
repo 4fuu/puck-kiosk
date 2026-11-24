@@ -4,6 +4,7 @@
 #include "app/pairing.h"
 #include "app/passkey.h"
 #include "app/plugin_ui.h"
+#include "app/ui_focus.h"
 #include "app/ui_input.h"
 #include "core/types.h"
 #include "render/canvas.h"
@@ -26,6 +27,12 @@ public:
     void set_sheet(const PluginSheet& sheet) { sheet_ = sheet; }
     void set_passkey(const PasskeyView& view) { passkey_ = view; }
     void set_debug(const DebugView& view) { debug_ = view; }
+    void set_focus(const UiFocusView& view) { focus_ = view; }
+
+    // Tracks whether the gamepad hint bar should be visible. Any gamepad event
+    // shows it; pointer activity hides it until the next gamepad event.
+    void notify_input(const InputEvent& event);
+    bool hints_visible() const { return hints_visible_; }
 
     void draw(Canvas& canvas, Size size, float time_seconds);
 
@@ -38,6 +45,7 @@ private:
     void draw_passkey(Canvas& canvas, Rect area, bool compact);
     void draw_sheet(Canvas& canvas, Rect area, bool compact);
     void draw_debug(Canvas& canvas, Size size);
+    void draw_focus_overlay(Canvas& canvas, Size size);
     void add_debug_target(Canvas& canvas, Size size, bool pairing);
     void add_target(Rect rect, UiAction action, int index = -1);
     float control_split(float time_seconds, bool in_call);
@@ -55,6 +63,8 @@ private:
     PasskeyView passkey_;
     DebugView debug_;
     UiHitMap hits_;
+    UiFocusView focus_;
+    bool hints_visible_ = false;
 
     // The web page animates the single call button into Mute/End over 400ms
     // with cubic-bezier(.22, 1, .36, 1). Split is 0 before a call and 1 during

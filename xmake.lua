@@ -102,8 +102,8 @@ target("ui-tests")
     set_default(false)
     set_rundir("$(projectdir)")
     add_files("tests/ui_tests.cpp", "src/app/car_ui.cpp", "src/app/ui_input.cpp",
-              "src/app/plugin_ui.cpp", "src/app/passkey.cpp", "src/app/diagnostics.cpp",
-              "src/app/media_overlay.cpp", "src/core/log.cpp")
+              "src/app/ui_focus.cpp", "src/app/plugin_ui.cpp", "src/app/passkey.cpp",
+              "src/app/diagnostics.cpp", "src/app/media_overlay.cpp", "src/core/log.cpp")
     add_includedirs("src", "third_party")
     add_links("m", "pthread", "png", "webp", "jpeg")
     set_warnings("all", "extra")

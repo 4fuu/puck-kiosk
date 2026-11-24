@@ -41,7 +41,7 @@ void print_help(const char* program) {
               << "  --demo-plugin <json|path> Feed a plugin.ui.* event before rendering the demo\n"
               << "  --demo-passkey <mode>   phone|local|confirming|none (passkey guidance demo)\n"
               << "  --demo-debug            Open the Debug panel in the demo\n"
-              << "  --input-script <json|path> Scripted {t,type,x,y,key} events; test hook\n"
+              << "  --input-script <json|path> Scripted {t,type,...} pointer/key/gamepad events; test hook\n"
               << "  --dump-targets          Log the hit rects of the current screen\n"
               << "  --echo-cancellation <m> on|remote-only|off (default on)\n"
               << "  --audio <name>          auto | file | null | alsa\n"

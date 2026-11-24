@@ -42,6 +42,59 @@ bool json_number(const nlohmann::json& value, double* out) {
     return false;
 }
 
+bool parse_gamepad_button(const std::string& name, InputEvent::GamepadButton* out) {
+    if (name == "a") {
+        *out = InputEvent::GamepadButton::A;
+    } else if (name == "b") {
+        *out = InputEvent::GamepadButton::B;
+    } else if (name == "x") {
+        *out = InputEvent::GamepadButton::X;
+    } else if (name == "y") {
+        *out = InputEvent::GamepadButton::Y;
+    } else if (name == "dpad_up") {
+        *out = InputEvent::GamepadButton::DPadUp;
+    } else if (name == "dpad_down") {
+        *out = InputEvent::GamepadButton::DPadDown;
+    } else if (name == "dpad_left") {
+        *out = InputEvent::GamepadButton::DPadLeft;
+    } else if (name == "dpad_right") {
+        *out = InputEvent::GamepadButton::DPadRight;
+    } else if (name == "start") {
+        *out = InputEvent::GamepadButton::Start;
+    } else if (name == "back") {
+        *out = InputEvent::GamepadButton::Back;
+    } else if (name == "lb" || name == "left_bumper") {
+        *out = InputEvent::GamepadButton::LeftBumper;
+    } else if (name == "rb" || name == "right_bumper") {
+        *out = InputEvent::GamepadButton::RightBumper;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool parse_gamepad_axis(const std::string& name, InputEvent::GamepadAxis* out) {
+    if (name == "left_x" || name == "lx") {
+        *out = InputEvent::GamepadAxis::LeftX;
+    } else if (name == "left_y" || name == "ly") {
+        *out = InputEvent::GamepadAxis::LeftY;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool parse_gamepad_state(const std::string& state, bool* down) {
+    if (state == "down" || state == "press" || state == "pressed") {
+        *down = true;
+    } else if (state == "up" || state == "release" || state == "released") {
+        *down = false;
+    } else {
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 const char* ui_action_name(UiAction action) {
@@ -135,6 +188,9 @@ UiAction UiInputRouter::handle(const InputEvent& event, int* index) {
         }
         case InputEvent::Type::PointerMove:
         case InputEvent::Type::KeyUp:
+        case InputEvent::Type::GamepadButtonDown:
+        case InputEvent::Type::GamepadButtonUp:
+        case InputEvent::Type::GamepadAxis:
         case InputEvent::Type::None:
             return UiAction::None;
     }
@@ -173,14 +229,76 @@ bool parse_input_script(const std::string& text, std::vector<ScriptedInput>* eve
             return fail("input script entry has no type");
         }
         ScriptedInput scripted;
-        if (!parse_event_type(entry["type"].get<std::string>(), &scripted.event.type)) {
-            return fail("unknown input script type: " + entry["type"].get<std::string>());
-        }
+        const std::string type = entry["type"].get<std::string>();
         double t = 0.0;
         if (entry.contains("t") && !json_number(entry["t"], &t)) {
             return fail("input script t is not a number");
         }
         scripted.t = t;
+
+        if (type == "gamepad" || type == "gamepad_axis") {
+            const bool has_axis = entry.contains("axis");
+            const bool has_button = entry.contains("button");
+            if (has_axis && has_button) {
+                return fail("gamepad entry has both button and axis");
+            }
+            if (has_axis) {
+                if (!entry["axis"].is_string()) {
+                    return fail("gamepad axis is not a string");
+                }
+                const std::string axis = entry["axis"].get<std::string>();
+                if (!parse_gamepad_axis(axis, &scripted.event.axis)) {
+                    return fail("unknown gamepad axis: " + axis);
+                }
+                if (!entry.contains("value")) {
+                    return fail("gamepad axis has no value");
+                }
+                double value = 0.0;
+                if (!json_number(entry["value"], &value)) {
+                    return fail("gamepad axis value is not a number");
+                }
+                if (value < -1.0 || value > 1.0) {
+                    return fail("gamepad axis value is outside -1..1");
+                }
+                scripted.event.type = InputEvent::Type::GamepadAxis;
+                scripted.event.value = static_cast<float>(value);
+            } else {
+                if (!has_button) {
+                    return fail("gamepad entry has no button or axis");
+                }
+                if (!entry["button"].is_string()) {
+                    return fail("gamepad button is not a string");
+                }
+                const std::string button = entry["button"].get<std::string>();
+                if (!parse_gamepad_button(button, &scripted.event.button)) {
+                    return fail("unknown gamepad button: " + button);
+                }
+                if (!entry.contains("state") || !entry["state"].is_string()) {
+                    return fail("gamepad button has no state");
+                }
+                bool down = false;
+                if (!parse_gamepad_state(entry["state"].get<std::string>(), &down)) {
+                    return fail("gamepad button state must be down or up");
+                }
+                scripted.event.type = down ? InputEvent::Type::GamepadButtonDown
+                                           : InputEvent::Type::GamepadButtonUp;
+            }
+            events->push_back(scripted);
+            continue;
+        }
+
+        if (type == "wait") {
+            if (!entry.contains("t")) {
+                return fail("wait entry has no t");
+            }
+            scripted.event.type = InputEvent::Type::None;
+            events->push_back(scripted);
+            continue;
+        }
+
+        if (!parse_event_type(type, &scripted.event.type)) {
+            return fail("unknown input script type: " + type);
+        }
         if (entry.contains("x")) {
             double x = 0.0;
             if (!json_number(entry["x"], &x)) {

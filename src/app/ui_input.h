@@ -89,7 +89,10 @@ struct ScriptedInput {
 };
 
 // Accepts a JSON array of {t, type, x, y, key}. Types: down, up, move,
-// key/keydown, keyup, quit. Keys accept integers or "Escape".
+// key/keydown, keyup, quit, gamepad, gamepad_axis, wait. Keys accept integers
+// or "Escape". A gamepad entry is {type:"gamepad", button:"a|b|x|y|dpad_up|...",
+// state:"down|up"} or {type:"gamepad", axis:"left_x|left_y", value:-1..1}.
+// "wait" advances the focus clock to t without producing an event.
 bool parse_input_script(const std::string& text, std::vector<ScriptedInput>* events,
                         std::string* error);
 

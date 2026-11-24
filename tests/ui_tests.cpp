@@ -3,6 +3,7 @@
 #include "app/media_overlay.h"
 #include "app/passkey.h"
 #include "app/plugin_ui.h"
+#include "app/ui_focus.h"
 #include "app/ui_input.h"
 #include "platform/audio.h"
 #include "platform/http.h"
@@ -118,6 +119,22 @@ pk::InputEvent pointer(pk::InputEvent::Type type, float x, float y) {
     event.type = type;
     event.x = x;
     event.y = y;
+    return event;
+}
+
+pk::InputEvent gamepad_button(pk::InputEvent::GamepadButton button, bool down) {
+    pk::InputEvent event;
+    event.type = down ? pk::InputEvent::Type::GamepadButtonDown
+                      : pk::InputEvent::Type::GamepadButtonUp;
+    event.button = button;
+    return event;
+}
+
+pk::InputEvent gamepad_axis(pk::InputEvent::GamepadAxis axis, float value) {
+    pk::InputEvent event;
+    event.type = pk::InputEvent::Type::GamepadAxis;
+    event.axis = axis;
+    event.value = value;
     return event;
 }
 
@@ -635,12 +652,221 @@ void test_media_buttons() {
     media.close();
 }
 
+void test_focus_navigation() {
+    pk::UiHitMap hits;
+    hits.add(pk::Rect{0, 0, 1280, 720}, pk::UiAction::None);
+    hits.add(pk::Rect{100, 100, 80, 60}, pk::UiAction::Mute);
+    hits.add(pk::Rect{300, 100, 80, 60}, pk::UiAction::End);
+    hits.add(pk::Rect{100, 300, 80, 60}, pk::UiAction::Call);
+    hits.add(pk::Rect{300, 300, 80, 60}, pk::UiAction::SheetOption, 0);
+    hits.add(pk::Rect{500, 100, 80, 60}, pk::UiAction::MediaClose);
+
+    pk::UiFocus focus;
+    focus.set_hit_map(&hits);
+    focus.sync();
+    CHECK(!focus.focused());
+
+    auto press = [&](pk::InputEvent::GamepadButton button, float t) {
+        return focus.handle(gamepad_button(button, true), t);
+    };
+
+    pk::UiFocusResult result = press(pk::InputEvent::GamepadButton::X, 0.0f);
+    CHECK(result.consumed);
+    CHECK(result.action == pk::UiAction::None);
+    CHECK(focus.focused_action() == pk::UiAction::Mute);  // blocker skipped
+    CHECK(focus.focused_index() == -1);
+
+    press(pk::InputEvent::GamepadButton::DPadRight, 0.1f);
+    CHECK(focus.focused_action() == pk::UiAction::End);
+    press(pk::InputEvent::GamepadButton::DPadDown, 0.2f);
+    CHECK(focus.focused_action() == pk::UiAction::SheetOption);
+    CHECK(focus.focused_index() == 0);
+    press(pk::InputEvent::GamepadButton::DPadRight, 0.3f);
+    CHECK(focus.focused_action() == pk::UiAction::MediaClose);
+    press(pk::InputEvent::GamepadButton::DPadRight, 0.4f);
+    CHECK(focus.focused_action() == pk::UiAction::Mute);  // cycle wraps forward
+    press(pk::InputEvent::GamepadButton::DPadUp, 0.5f);
+    CHECK(focus.focused_action() == pk::UiAction::MediaClose);  // cycle wraps back
+    press(pk::InputEvent::GamepadButton::DPadLeft, 0.6f);
+    CHECK(focus.focused_action() == pk::UiAction::End);  // nearest left
+
+    focus.handle(gamepad_axis(pk::InputEvent::GamepadAxis::LeftY, 0.8f), 0.7f);
+    CHECK(focus.focused_action() == pk::UiAction::SheetOption);
+    focus.handle(gamepad_axis(pk::InputEvent::GamepadAxis::LeftY, 0.9f), 0.8f);
+    CHECK(focus.focused_action() == pk::UiAction::SheetOption);  // no repeat while held
+    focus.handle(gamepad_axis(pk::InputEvent::GamepadAxis::LeftY, 0.0f), 0.9f);
+    focus.handle(gamepad_axis(pk::InputEvent::GamepadAxis::LeftY, -0.8f), 1.0f);
+    CHECK(focus.focused_action() == pk::UiAction::End);
+    focus.handle(gamepad_axis(pk::InputEvent::GamepadAxis::LeftX, 0.0f), 1.1f);
+    focus.handle(gamepad_axis(pk::InputEvent::GamepadAxis::LeftX, 0.8f), 1.2f);
+    CHECK(focus.focused_action() == pk::UiAction::MediaClose);
+
+    const pk::UiFocusView view = focus.view(1.2f, true);
+    CHECK(view.focused && view.visible);
+    CHECK(view.action == pk::UiAction::MediaClose);
+    CHECK(focus.focused_rect() != nullptr);
+
+    focus.reset();
+    CHECK(!focus.focused());
+    CHECK(!focus.hold_active());
+}
+
+void test_focus_actions() {
+    pk::UiHitMap hits;
+    hits.add(pk::Rect{100, 100, 80, 60}, pk::UiAction::Mute);
+    hits.add(pk::Rect{300, 100, 80, 60}, pk::UiAction::End);
+
+    pk::UiFocus focus;
+    focus.set_hit_map(&hits);
+    focus.sync();
+
+    // The first gamepad event focuses the first target; A activates it.
+    pk::UiFocusResult result =
+        focus.handle(gamepad_button(pk::InputEvent::GamepadButton::A, true), 0.0f);
+    CHECK(result.consumed);
+    CHECK(result.action == pk::UiAction::Mute);
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::A, false), 0.0f);
+
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::DPadRight, true), 0.1f);
+    CHECK(focus.focused_action() == pk::UiAction::End);
+    result = focus.handle(gamepad_button(pk::InputEvent::GamepadButton::A, true), 1.0f);
+    CHECK(result.consumed);
+    CHECK(result.action == pk::UiAction::None);
+    CHECK(focus.hold_active());
+    CHECK(std::fabs(focus.hold_progress(1.45f) - 0.5f) < 0.01f);
+    result = focus.update(1.45f);
+    CHECK(result.action == pk::UiAction::None);
+    CHECK(focus.hold_active());
+    result = focus.update(1.91f);
+    CHECK(result.action == pk::UiAction::End);
+    CHECK(!focus.hold_active());
+    CHECK(focus.update(2.0f).action == pk::UiAction::None);
+
+    // Releasing A before the hold completes cancels it.
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::A, true), 3.0f);
+    CHECK(focus.hold_active());
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::A, false), 3.2f);
+    CHECK(!focus.hold_active());
+    CHECK(focus.update(4.0f).action == pk::UiAction::None);
+
+    // Navigation also cancels a hold.
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::A, true), 5.0f);
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::DPadLeft, true), 5.1f);
+    CHECK(!focus.hold_active());
+    CHECK(focus.focused_action() == pk::UiAction::Mute);
+
+    // B dismisses the topmost overlay; Start toggles Debug.
+    result = focus.handle(gamepad_button(pk::InputEvent::GamepadButton::B, true), 6.0f);
+    CHECK(result.consumed && result.dismiss);
+    result = focus.handle(gamepad_button(pk::InputEvent::GamepadButton::Back, true), 6.05f);
+    CHECK(result.consumed && result.dismiss);
+    result =
+        focus.handle(gamepad_button(pk::InputEvent::GamepadButton::Start, true), 6.1f);
+    CHECK(result.consumed && result.toggle_debug);
+
+    // Pointer press on End starts the same hold; release cancels.
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::DPadRight, true), 7.0f);
+    CHECK(focus.focused_action() == pk::UiAction::End);
+    result = focus.handle(pointer(pk::InputEvent::Type::PointerDown, 340, 130), 7.1f);
+    CHECK(result.consumed && focus.hold_active());
+    result = focus.handle(pointer(pk::InputEvent::Type::PointerUp, 340, 130), 7.2f);
+    CHECK(result.consumed && !focus.hold_active());
+
+    // A pointer press on a non-End target is left to the pointer router.
+    result = focus.handle(pointer(pk::InputEvent::Type::PointerDown, 140, 130), 7.3f);
+    CHECK(!result.consumed && !focus.hold_active());
+
+    // Holding a pointer press completes without waiting for release.
+    focus.handle(pointer(pk::InputEvent::Type::PointerDown, 340, 130), 8.0f);
+    CHECK(focus.hold_active());
+    result = focus.update(8.95f);
+    CHECK(result.action == pk::UiAction::End);
+    CHECK(!focus.hold_active());
+    result = focus.handle(pointer(pk::InputEvent::Type::PointerUp, 340, 130), 9.0f);
+    CHECK(!result.consumed);
+
+    // A disappearing End target cancels the hold instead of firing.
+    CHECK(focus.focused_action() == pk::UiAction::End);
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::A, true), 10.0f);
+    CHECK(focus.hold_active());
+    hits.clear();
+    hits.add(pk::Rect{100, 100, 80, 60}, pk::UiAction::Mute);
+    focus.sync();
+    CHECK(focus.focused_action() == pk::UiAction::Mute);
+    result = focus.update(10.5f);
+    CHECK(result.action == pk::UiAction::None);
+    CHECK(!focus.hold_active());
+}
+
+void test_focus_occlusion() {
+    pk::UiHitMap hits;
+    hits.add(pk::Rect{100, 100, 80, 60}, pk::UiAction::MediaClose);
+    hits.add(pk::Rect{0, 0, 200, 200}, pk::UiAction::None);  // covers MediaClose
+    hits.add(pk::Rect{300, 100, 80, 60}, pk::UiAction::Mute);
+
+    pk::UiFocus focus;
+    focus.set_hit_map(&hits);
+    focus.sync();
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::X, true), 0.0f);
+    CHECK(focus.focused_action() == pk::UiAction::Mute);
+}
+
+void test_hint_visibility() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+    CHECK(!ui.hints_visible());
+    ui.notify_input(gamepad_button(pk::InputEvent::GamepadButton::A, true));
+    CHECK(ui.hints_visible());
+    ui.notify_input(pointer(pk::InputEvent::Type::PointerMove, 1, 1));
+    CHECK(!ui.hints_visible());
+    ui.notify_input(gamepad_button(pk::InputEvent::GamepadButton::DPadDown, true));
+    CHECK(ui.hints_visible());
+    ui.notify_input(pointer(pk::InputEvent::Type::PointerDown, 1, 1));
+    CHECK(!ui.hints_visible());
+}
+
+void test_gamepad_script() {
+    const std::string text = R"([
+        {"t": 0.3, "type": "gamepad", "axis": "left_x", "value": 0.75},
+        {"t": 0.1, "type": "gamepad", "button": "a", "state": "down"},
+        {"t": 0.2, "type": "gamepad", "button": "dpad_up", "state": "up"},
+        {"t": 0.4, "type": "wait"}
+    ])";
+    std::vector<pk::ScriptedInput> events;
+    std::string error;
+    CHECK_MSG(pk::parse_input_script(text, &events, &error), error);
+    CHECK(events.size() == 4);
+    CHECK(events[0].event.type == pk::InputEvent::Type::GamepadButtonDown);
+    CHECK(events[0].event.button == pk::InputEvent::GamepadButton::A);
+    CHECK(events[1].event.type == pk::InputEvent::Type::GamepadButtonUp);
+    CHECK(events[1].event.button == pk::InputEvent::GamepadButton::DPadUp);
+    CHECK(events[2].event.type == pk::InputEvent::Type::GamepadAxis);
+    CHECK(events[2].event.axis == pk::InputEvent::GamepadAxis::LeftX);
+    CHECK(std::fabs(events[2].event.value - 0.75f) < 0.001f);
+    CHECK(events[3].event.type == pk::InputEvent::Type::None);
+    CHECK(events[3].t == 0.4);
+
+    std::vector<pk::ScriptedInput> bad;
+    CHECK(!pk::parse_input_script(
+        "[{\"type\":\"gamepad\",\"button\":\"nope\",\"state\":\"down\"}]", &bad, &error));
+    CHECK(!pk::parse_input_script(
+        "[{\"type\":\"gamepad\",\"button\":\"a\",\"state\":\"sideways\"}]", &bad, &error));
+    CHECK(!pk::parse_input_script(
+        "[{\"type\":\"gamepad\",\"axis\":\"left_z\",\"value\":0.5}]", &bad, &error));
+    CHECK(!pk::parse_input_script(
+        "[{\"type\":\"gamepad\",\"axis\":\"left_x\",\"value\":2}]", &bad, &error));
+    CHECK(!pk::parse_input_script("[{\"type\":\"gamepad\"}]", &bad, &error));
+    CHECK(!pk::parse_input_script("[{\"type\":\"wait\"}]", &bad, &error));
+}
+
 }  // namespace
 
 int main() {
     test_hit_map();
     test_router();
     test_script();
+    test_gamepad_script();
     test_dispatch();
     test_plugin_ui();
     test_passkey();
@@ -648,6 +874,10 @@ int main() {
     test_car_ui_targets();
     test_control_animation();
     test_media_buttons();
+    test_focus_navigation();
+    test_focus_actions();
+    test_focus_occlusion();
+    test_hint_visibility();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

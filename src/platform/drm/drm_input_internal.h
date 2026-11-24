@@ -12,6 +12,8 @@ namespace pk {
 
 std::unique_ptr<InputSource> create_libinput_input(const Display& display, std::string* error);
 std::unique_ptr<InputSource> create_evdev_input(const Display& display, std::string* error);
+std::unique_ptr<InputSource> create_evdev_gamepad_input(const Display& display,
+                                                        std::string* error);
 
 namespace drm_input {
 

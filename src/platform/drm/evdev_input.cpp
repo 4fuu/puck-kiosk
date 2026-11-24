@@ -178,6 +178,12 @@ bool describe(Device& device) {
         device.relative = true;
     }
 
+    // Standard gamepads also expose ABS_X/ABS_Y for the left stick; they are
+    // read by the gamepad source instead of moving a virtual pointer.
+    if (has_key_bits && bit_set(key_bits, BTN_SOUTH)) {
+        return false;
+    }
+
     const bool has_keyboard = has_key_bits && bit_set(key_bits, KEY_ESC);
     const bool has_touch_button = has_key_bits && bit_set(key_bits, BTN_TOUCH);
     const bool has_pointer_button = has_key_bits && bit_set(key_bits, BTN_LEFT);

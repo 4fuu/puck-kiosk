@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -654,10 +655,218 @@ void draw_call_controls(Canvas& canvas, const CallLayout& layout, const CallView
     }
 }
 
+enum class HintBadge {
+    A,
+    B,
+    DPad,
+    Start,
+};
+
+struct HintItem {
+    HintBadge badge = HintBadge::A;
+    std::string label;
+};
+
+std::string focus_hint_label(UiAction action, bool holding, bool muted) {
+    switch (action) {
+        case UiAction::Call: return "Call";
+        case UiAction::Mute: return muted ? "Unmute" : "Mute";
+        case UiAction::End: return holding ? "Keep holding" : "Hold to end call";
+        case UiAction::MediaClose: return "Close";
+        case UiAction::MediaPrevious: return "Previous";
+        case UiAction::MediaNext: return "Next";
+        case UiAction::SheetOption: return "Select";
+        case UiAction::SheetDismiss: return "Dismiss";
+        case UiAction::SheetOk: return "OK";
+        case UiAction::PasskeyConfirm: return "Confirm";
+        case UiAction::DebugOpen: return "Open";
+        case UiAction::DebugClose: return "Close";
+        case UiAction::EchoMode: return "Select";
+        case UiAction::MicTest: return "Test mic";
+        case UiAction::SendDiagnostics: return "Send";
+        case UiAction::None:
+        case UiAction::Escape:
+            return {};
+    }
+    return {};
+}
+
+void draw_hint_badge(Canvas& canvas, HintBadge badge, float center_x, float center_y,
+                     float diameter, Color fill, Color ink) {
+    canvas.fill_circle(center_x, center_y, diameter * 0.5f, fill);
+    if (badge == HintBadge::A || badge == HintBadge::B) {
+        const TextStyle style =
+            type(diameter * 0.62f, ink, TextAlign::Center, FontWeight::Semibold);
+        canvas.text(center_x, center_y, style, badge == HintBadge::A ? "A" : "B");
+        return;
+    }
+    if (badge == HintBadge::DPad) {
+        canvas.fill_rect(Rect{center_x - diameter * 0.28f, center_y - diameter * 0.09f,
+                              diameter * 0.56f, diameter * 0.18f},
+                         ink);
+        canvas.fill_rect(Rect{center_x - diameter * 0.09f, center_y - diameter * 0.28f,
+                              diameter * 0.18f, diameter * 0.56f},
+                         ink);
+        return;
+    }
+    const float width = diameter * 0.48f;
+    const float height = diameter * 0.09f;
+    for (int i = -1; i <= 1; ++i) {
+        canvas.fill_rect(Rect{center_x - width * 0.5f,
+                              center_y + static_cast<float>(i) * diameter * 0.20f - height * 0.5f,
+                              width, height},
+                         ink);
+    }
+}
+
+void draw_hold_ring(Canvas& canvas, Rect rect, float progress) {
+    const float radius = std::min(rect.w, rect.h) * 0.5f + 8.0f;
+    const float center_x = rect.center_x();
+    const float center_y = rect.center_y();
+    canvas.stroke_circle(center_x, center_y, radius, 4.0f, hex(0x54b879, 0.22f));
+    const int segments = 64;
+    const int filled = static_cast<int>(std::ceil(clamp01(progress) * segments));
+    const float step = 6.2831853f / static_cast<float>(segments);
+    for (int i = 0; i < filled; ++i) {
+        const float start = -1.5707963f + step * static_cast<float>(i);
+        const float end = start + step * 0.82f;
+        canvas.stroke_line(center_x + std::cos(start) * radius,
+                           center_y + std::sin(start) * radius,
+                           center_x + std::cos(end) * radius,
+                           center_y + std::sin(end) * radius, 4.0f, kSuccess);
+    }
+}
+
 }  // namespace
 
 void CarUi::add_target(Rect rect, UiAction action, int index) {
     hits_.add(rect, action, index);
+}
+
+void CarUi::notify_input(const InputEvent& event) {
+    if (is_gamepad_event(event)) {
+        hints_visible_ = true;
+        return;
+    }
+    if (event.type == InputEvent::Type::PointerDown ||
+        event.type == InputEvent::Type::PointerMove ||
+        event.type == InputEvent::Type::PointerUp) {
+        hints_visible_ = false;
+    }
+}
+
+void CarUi::draw_focus_overlay(Canvas& canvas, Size size) {
+    if (!focus_.visible && !focus_.holding) {
+        return;
+    }
+
+    const UiTarget* target = nullptr;
+    if (focus_.focused) {
+        for (const UiTarget& candidate : hits_.targets()) {
+            if (candidate.action == focus_.action && candidate.index == focus_.index) {
+                target = &candidate;
+                break;
+            }
+        }
+    }
+
+    if (target) {
+        const Rect rect = target->rect;
+        const bool round = target->action == UiAction::Call ||
+                           target->action == UiAction::Mute ||
+                           target->action == UiAction::End ||
+                           target->action == UiAction::MediaPrevious ||
+                           target->action == UiAction::MediaNext;
+        if (round) {
+            canvas.stroke_circle(rect.center_x(), rect.center_y(),
+                                 std::min(rect.w, rect.h) * 0.5f + 4.0f, 3.0f, kSuccess);
+        } else {
+            const Rect outline{rect.x - 3.0f, rect.y - 3.0f, rect.w + 6.0f, rect.h + 6.0f};
+            canvas.stroke_line(outline.x, outline.y, outline.x + outline.w, outline.y, 3.0f,
+                               kSuccess);
+            canvas.stroke_line(outline.x, outline.y + outline.h, outline.x + outline.w,
+                               outline.y + outline.h, 3.0f, kSuccess);
+            canvas.stroke_line(outline.x, outline.y, outline.x, outline.y + outline.h, 3.0f,
+                               kSuccess);
+            canvas.stroke_line(outline.x + outline.w, outline.y, outline.x + outline.w,
+                               outline.y + outline.h, 3.0f, kSuccess);
+        }
+        if (focus_.holding && target->action == UiAction::End) {
+            draw_hold_ring(canvas, rect, focus_.hold_progress);
+        }
+    }
+
+    // Pointer and touch input hide the gamepad hint bar, but a hold in progress
+    // still draws its ring above.
+    if (!focus_.visible) {
+        return;
+    }
+
+    const bool compact = compact_layout(size);
+    const float font = compact ? 14.0f : 16.0f;
+    const TextStyle label_style =
+        type(font, kForeground, TextAlign::Left, FontWeight::Medium);
+    const float badge = compact ? 20.0f : 24.0f;
+    const float label_gap = 7.0f;
+    const float item_gap = compact ? 14.0f : 22.0f;
+
+    std::vector<HintItem> items;
+    if (focus_.focused) {
+        const std::string label = focus_hint_label(focus_.action, focus_.holding, call_.muted);
+        if (!label.empty()) {
+            items.push_back(HintItem{HintBadge::A, label});
+        }
+    }
+    items.push_back(HintItem{HintBadge::DPad, "Navigate"});
+    const bool overlay_open = debug_.open || sheet_.kind != PluginSheetKind::None ||
+                              (media_ && media_->visible());
+    if (overlay_open) {
+        items.push_back(HintItem{HintBadge::B, "Back"});
+    }
+    items.push_back(HintItem{HintBadge::Start, debug_.open ? "Close debug" : "Debug"});
+
+    auto total_width = [&]() {
+        float total = 0.0f;
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            if (i > 0) {
+                total += item_gap;
+            }
+            total += badge + label_gap + canvas.measure_text(label_style, items[i].label);
+        }
+        return total;
+    };
+    const float available = static_cast<float>(size.width) - 24.0f;
+    auto drop = [&](HintBadge wanted) {
+        for (std::size_t i = 1; i < items.size(); ++i) {
+            if (items[i].badge == wanted) {
+                items.erase(items.begin() + static_cast<std::ptrdiff_t>(i));
+                return true;
+            }
+        }
+        return false;
+    };
+    while (total_width() > available && items.size() > 1) {
+        if (drop(HintBadge::DPad) || drop(HintBadge::Start) || drop(HintBadge::B)) {
+            continue;
+        }
+        break;
+    }
+
+    const float bar_height = badge + 8.0f;
+    const float bar_width = total_width() + 20.0f;
+    const Rect bar{(static_cast<float>(size.width) - bar_width) * 0.5f,
+                   static_cast<float>(size.height) - bar_height - 8.0f, bar_width,
+                   bar_height};
+    canvas.fill_rounded_rect(bar, bar_height * 0.5f, hex(0x1a211a, 0.92f));
+
+    float x = bar.x + 10.0f;
+    for (const HintItem& item : items) {
+        draw_hint_badge(canvas, item.badge, x + badge * 0.5f, bar.center_y(), badge,
+                        kForeground, kBackground);
+        x += badge + label_gap;
+        canvas.text(x, bar.center_y(), label_style, item.label);
+        x += canvas.measure_text(label_style, item.label) + item_gap;
+    }
 }
 
 void CarUi::set_pairing(const QrCode& qr, std::string title, std::string status, std::string code) {
@@ -700,13 +909,12 @@ void CarUi::draw(Canvas& canvas, Size size, float time_seconds) {
     hits_.clear();
     if (debug_.open) {
         draw_debug(canvas, size);
-        return;
-    }
-    if (call_mode_) {
+    } else if (call_mode_) {
         draw_call(canvas, size, time_seconds);
     } else {
         draw_pairing(canvas, size, time_seconds);
     }
+    draw_focus_overlay(canvas, size);
 }
 
 void CarUi::draw_pairing(Canvas& canvas, Size size, float time_seconds) {
@@ -1138,11 +1346,14 @@ void CarUi::add_debug_target(Canvas& canvas, Size size, bool pairing) {
     const float debug_font = compact ? 16.0f : 20.0f;
     const float debug_pad = compact ? 16.0f : 24.0f;
     const float margin = compact ? 12.0f : (pairing ? 40.0f : 24.0f);
-    const float debug_width =
-        canvas.measure_text(type(debug_font, kForeground), "Debug") + debug_pad * 2.0f;
+    const TextStyle label_style =
+        type(debug_font, kMuted, TextAlign::Center, FontWeight::Medium);
+    const float debug_width = canvas.measure_text(label_style, "Debug") + debug_pad * 2.0f;
     const Rect entry{margin + kSafeLeft, static_cast<float>(size.height) - margin - debug_height -
                                               kSafeBottom,
                      debug_width, debug_height};
+    canvas.fill_rounded_rect(entry, debug_height * 0.5f, hex(0x2f372f, 0.65f));
+    canvas.text(entry.center_x(), entry.center_y(), label_style, "Debug");
     add_target(entry, UiAction::DebugOpen);
 }
 
