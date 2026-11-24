@@ -32,6 +32,17 @@ constexpr const char* kFaceJsonPath = "assets/cache/3d/classic/puck-499552ba.jso
 constexpr float kEyeOverlayScale = 0.9346f;
 constexpr float kMouthBaselineOffset = 0.55f;
 
+// The interaction uses fractions of the image height, so the 2D renderer
+// needs the same reference frame as the rig.
+constexpr float kPuckAspect = 498.0f / 602.0f;
+constexpr float kPuckGroundY = 577.0f / 602.0f;
+constexpr float kPuckEyeX = 277.3f / 498.0f;
+constexpr float kPuckEyeY = 184.05f / 602.0f;
+// The web's `U = 0.45` tanh tip limit; a bigger shear is not representable
+// with the Canvas API's axis-aligned image draws.
+constexpr float kMaxLean = 0.45f;
+constexpr int kBandCount = 64;
+
 // The web mouth overlay is authored in a canonical 38 px half-width space.
 constexpr float kMouthCanonicalHalfWidth = 38.0f;
 constexpr float kMouthCanonicalLine = 1.1f;
@@ -86,16 +97,25 @@ struct Pose {
     float breathe_x = 1.0f;
     float breathe_y = 1.0f;
     float lift = 0.0f;
+    float lean = 0.0f;
+    float pivot_y = 0.0f;
 
-    float x(float face_x) const {
+    float base_x(float face_x) const {
         const float local = image.x + face_x * scale_x;
         return origin_x + (local - origin_x) * breathe_x;
     }
 
-    float y(float face_y) const {
+    float base_y(float face_y) const {
         const float local = image.y + face_y * scale_y;
         return origin_y + (local - origin_y) * breathe_y + lift;
     }
+
+    // A horizontal shear around the ground reads as a lean. The Canvas seam
+    // has no rotated-image draw, so Puck2D draws the sprite in bands.
+    float shear(float y) const { return std::tan(lean) * (y - pivot_y); }
+
+    float x(float face_x, float face_y) const { return base_x(face_x) + shear(base_y(face_y)); }
+    float y(float face_y) const { return base_y(face_y); }
 
     float rx(float radius) const { return radius * scale_x * breathe_x; }
     float ry(float radius) const { return radius * scale_y * breathe_y; }
@@ -356,6 +376,7 @@ void Puck2D::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual, float t
             image_failed_ = true;
             log::warn("2D Puck: cannot upload the sprite; using the placeholder");
         } else {
+            create_bands(canvas);
             assets_->sprite.rgba.clear();
             assets_->sprite.rgba.shrink_to_fit();
         }
@@ -369,7 +390,37 @@ void Puck2D::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual, float t
     draw_assets(canvas, bounds, visual, time_seconds);
 }
 
+void Puck2D::create_bands(Canvas& canvas) {
+    const Sprite& sprite = assets_->sprite;
+    if (sprite.rgba.empty() || sprite.width <= 0 || sprite.height <= 0) {
+        return;
+    }
+    const int band_height = std::max(1, (sprite.height + kBandCount - 1) / kBandCount);
+    const std::size_t row_bytes = static_cast<std::size_t>(sprite.width) * 4u;
+    std::vector<Band> bands;
+    for (int y = 0; y < sprite.height; y += band_height) {
+        const int height = std::min(band_height, sprite.height - y);
+        const std::uint8_t* pixels =
+            sprite.rgba.data() + static_cast<std::size_t>(y) * row_bytes;
+        const ImageHandle image = canvas.create_image(pixels, sprite.width, height);
+        if (image == kInvalidImage) {
+            for (const Band& band : bands) {
+                canvas.release_image(band.image);
+            }
+            return;
+        }
+        bands.push_back(Band{image, y, height});
+    }
+    bands_ = std::move(bands);
+}
+
 void Puck2D::release_image() {
+    for (const Band& band : bands_) {
+        if (band.image != kInvalidImage && canvas_) {
+            canvas_->release_image(band.image);
+        }
+    }
+    bands_.clear();
     if (image_ != kInvalidImage && canvas_) {
         canvas_->release_image(image_);
     }
@@ -378,13 +429,27 @@ void Puck2D::release_image() {
 }
 
 void Puck2D::draw_placeholder(Canvas& canvas, Rect bounds, const PuckVisual& visual, float time_seconds) {
+    const float image_height = std::min(bounds.h, bounds.w / kPuckAspect);
     const float size = std::min(bounds.w, bounds.h) * 0.92f;
     const float cx = bounds.center_x();
     const float cy = bounds.center_y() + size * 0.015f;
     const float breathe = 1.0f + 0.012f * std::sin(time_seconds * 1.9f);
 
-    const float body_rx = size * 0.275f;
-    const float body_ry = size * 0.345f * breathe;
+    const PuckPose& interaction = visual.pose;
+    const float squash = std::max(0.4f, 1.0f + interaction.squash);
+    const float squash_x = 1.0f / std::sqrt(squash);
+    const float shift_x = interaction.shift_x * image_height;
+    const float lift_y = interaction.lift_y * image_height;
+    const float lean = std::clamp(interaction.roll + interaction.pitch +
+                                      (interaction.grabbed ? 0.0f : body_turn_),
+                                  -kMaxLean, kMaxLean);
+    const float tan_lean = std::tan(lean);
+
+    const float body_rx = size * 0.275f * squash_x;
+    const float body_ry = size * 0.345f * breathe * squash;
+    const float ground = cy + body_ry * 1.03f;
+    const auto px = [&](float x, float y) { return x + shift_x + tan_lean * (y - ground); };
+    const auto py = [&](float y) { return y - lift_y; };
 
     const Color skin = visual.not_listening ? hex(0x3f4233) : hex(0x505238);
     const Color skin_shadow = visual.not_listening ? hex(0x303226) : hex(0x3f412b);
@@ -393,48 +458,78 @@ void Puck2D::draw_placeholder(Canvas& canvas, Rect bounds, const PuckVisual& vis
     const Color line = visual.not_listening ? hex(0x24261c) : hex(0x2a2c1e);
 
     // Soft ground shadow.
-    canvas.fill_ellipse(cx, cy + body_ry * 1.03f, body_rx * 0.78f, size * 0.017f, hex(0x000000, 0.32f));
+    canvas.fill_ellipse(px(cx, ground), py(ground), body_rx * 0.78f, size * 0.017f,
+                        hex(0x000000, 0.32f));
 
     // Legs and arms are intentionally simple shapes. This is the fallback when
     // the fetched avatar and face data are unavailable.
-    canvas.fill_ellipse(cx - body_rx * 0.38f, cy + body_ry * 1.02f, size * 0.044f, size * 0.155f, skin);
-    canvas.fill_ellipse(cx + body_rx * 0.38f, cy + body_ry * 1.02f, size * 0.044f, size * 0.155f, skin);
-    canvas.fill_ellipse(cx - body_rx * 1.00f, cy + body_ry * 0.55f, size * 0.032f, size * 0.180f, skin_shadow);
-    canvas.fill_ellipse(cx + body_rx * 1.00f, cy + body_ry * 0.55f, size * 0.032f, size * 0.180f, skin_shadow);
+    canvas.fill_ellipse(px(cx - body_rx * 0.38f, cy + body_ry * 1.02f),
+                        py(cy + body_ry * 1.02f), size * 0.044f, size * 0.155f, skin);
+    canvas.fill_ellipse(px(cx + body_rx * 0.38f, cy + body_ry * 1.02f),
+                        py(cy + body_ry * 1.02f), size * 0.044f, size * 0.155f, skin);
+    canvas.fill_ellipse(px(cx - body_rx * 1.00f, cy + body_ry * 0.55f),
+                        py(cy + body_ry * 0.55f), size * 0.032f, size * 0.180f, skin_shadow);
+    canvas.fill_ellipse(px(cx + body_rx * 1.00f, cy + body_ry * 0.55f),
+                        py(cy + body_ry * 0.55f), size * 0.032f, size * 0.180f, skin_shadow);
 
     // Body.
-    canvas.fill_ellipse(cx, cy, body_rx, body_ry, skin);
-    canvas.fill_ellipse(cx - body_rx * 0.18f, cy - body_ry * 0.18f, body_rx * 0.72f, body_ry * 0.70f,
+    canvas.fill_ellipse(px(cx, cy), py(cy), body_rx, body_ry, skin);
+    canvas.fill_ellipse(px(cx - body_rx * 0.18f, cy - body_ry * 0.18f),
+                        py(cy - body_ry * 0.18f), body_rx * 0.72f, body_ry * 0.70f,
                         hex(0x6a6d4a, 0.07f));
 
     // Eyes.
     const float eye_dx = body_rx * 0.42f;
     const float eye_y = cy - body_ry * 0.30f;
     const float eye_r = size * 0.052f;
-    canvas.fill_circle(cx - eye_dx, eye_y, eye_r, sclera);
-    canvas.fill_circle(cx + eye_dx, eye_y, eye_r, sclera);
+    canvas.fill_circle(px(cx - eye_dx, eye_y), py(eye_y), eye_r, sclera);
+    canvas.fill_circle(px(cx + eye_dx, eye_y), py(eye_y), eye_r, sclera);
 
-    const float gaze_y = visual.thinking ? -eye_r * 0.28f : 0.0f;
-    canvas.fill_circle(cx - eye_dx, eye_y + gaze_y, eye_r * 0.42f, pupil);
-    canvas.fill_circle(cx + eye_dx, eye_y + gaze_y, eye_r * 0.42f, pupil);
+    float gaze_x = 0.0f;
+    float gaze_y = visual.thinking ? -0.65f : 0.0f;
+    if (interaction.pointer_active && !visual.speaking && !visual.listening &&
+        !visual.thinking && !visual.not_listening) {
+        const float eye_center_x = px(cx, eye_y);
+        const float eye_center_y = py(eye_y);
+        const float dx = interaction.pointer_x - eye_center_x;
+        const float dy = interaction.pointer_y - eye_center_y;
+        const float distance = std::hypot(dx, dy);
+        const float reach = std::max(160.0f, bounds.w * 1.5f);
+        const float amount = std::min(1.0f, distance / reach);
+        if (distance >= 1.0f) {
+            gaze_x = dx / distance * amount;
+            gaze_y = dy / distance * amount;
+        }
+    }
+    const float pupil_dx = gaze_x * eye_r * 0.42f;
+    const float pupil_dy = gaze_y * eye_r * 0.42f;
+    canvas.fill_circle(px(cx - eye_dx, eye_y) + pupil_dx, py(eye_y) + pupil_dy, eye_r * 0.42f,
+                       pupil);
+    canvas.fill_circle(px(cx + eye_dx, eye_y) + pupil_dx, py(eye_y) + pupil_dy, eye_r * 0.42f,
+                       pupil);
 
     if (visual.not_listening) {
-        canvas.fill_ellipse(cx - eye_dx, eye_y - eye_r * 0.35f, eye_r * 1.15f, eye_r * 0.55f, skin);
-        canvas.fill_ellipse(cx + eye_dx, eye_y - eye_r * 0.35f, eye_r * 1.15f, eye_r * 0.55f, skin);
+        canvas.fill_ellipse(px(cx - eye_dx, eye_y - eye_r * 0.35f),
+                            py(eye_y - eye_r * 0.35f), eye_r * 1.15f, eye_r * 0.55f, skin);
+        canvas.fill_ellipse(px(cx + eye_dx, eye_y - eye_r * 0.35f),
+                            py(eye_y - eye_r * 0.35f), eye_r * 1.15f, eye_r * 0.55f, skin);
     }
 
     // Nose.
-    canvas.fill_triangle(cx, cy - body_ry * 0.10f,
-                         cx - size * 0.018f, cy + body_ry * 0.16f,
-                         cx + size * 0.018f, cy + body_ry * 0.16f, skin_shadow);
+    canvas.fill_triangle(px(cx, cy - body_ry * 0.10f), py(cy - body_ry * 0.10f),
+                         px(cx - size * 0.018f, cy + body_ry * 0.16f),
+                         py(cy + body_ry * 0.16f),
+                         px(cx + size * 0.018f, cy + body_ry * 0.16f),
+                         py(cy + body_ry * 0.16f), skin_shadow);
 
     // Mouth.
+    const float mouth_y = cy + body_ry * 0.33f;
     if (visual.speaking) {
         const float open = 0.018f + 0.014f * std::abs(std::sin(time_seconds * 9.0f));
-        canvas.fill_ellipse(cx, cy + body_ry * 0.33f, size * 0.038f, size * open, line);
+        canvas.fill_ellipse(px(cx, mouth_y), py(mouth_y), size * 0.038f, size * open, line);
     } else {
-        canvas.stroke_line(cx - size * 0.085f, cy + body_ry * 0.33f,
-                           cx + size * 0.085f, cy + body_ry * 0.33f, 2.2f, line);
+        canvas.stroke_line(px(cx - size * 0.085f, mouth_y), py(mouth_y),
+                           px(cx + size * 0.085f, mouth_y), py(mouth_y), 2.2f, line);
     }
 }
 
@@ -453,19 +548,29 @@ void Puck2D::draw_assets(Canvas& canvas, Rect bounds, const PuckVisual& visual, 
 
     const float phase = std::fmod(time, 3.2f) / 3.2f;
     const float breathe = visual.speaking ? 0.0f : 0.5f - 0.5f * std::cos(phase * 6.28318530718f);
-    const float breathe_x = 1.0f + 0.012f * breathe;
-    const float breathe_y = 1.0f - 0.015f * breathe;
-    const float lift = 0.004f * image_height * breathe;
+    const PuckPose& interaction = visual.pose;
+    const float squash = std::max(0.4f, 1.0f + interaction.squash);
+    const float squash_x = 1.0f / std::sqrt(squash);
+    const float breathe_x = (1.0f + 0.012f * breathe) * squash_x;
+    const float breathe_y = (1.0f - 0.015f * breathe) * squash;
+    const float lift = 0.004f * image_height * breathe - interaction.lift_y * image_height;
+    const float lean = std::clamp(interaction.roll + interaction.pitch +
+                                      (interaction.grabbed ? 0.0f : body_turn_),
+                                  -kMaxLean, kMaxLean);
 
     Pose pose;
     pose.image = image_rect;
-    pose.origin_x = image_rect.center_x();
+    pose.origin_x = image_rect.center_x() + interaction.shift_x * image_height;
     pose.origin_y = image_rect.y + image_rect.h * 0.95f;
     pose.scale_x = image_rect.w / static_cast<float>(assets.face.width > 0 ? assets.face.width : assets.sprite.width);
     pose.scale_y = image_rect.h / static_cast<float>(assets.face.height > 0 ? assets.face.height : assets.sprite.height);
     pose.breathe_x = breathe_x;
     pose.breathe_y = breathe_y;
     pose.lift = lift;
+    pose.lean = lean;
+    pose.pivot_y = pose.origin_y +
+                   (image_rect.y + image_rect.h * kPuckGroundY - pose.origin_y) * breathe_y +
+                   lift;
 
     const float dim = visual.not_listening ? 0.62f : 1.0f;
     const Rect sprite_rect{
@@ -474,7 +579,24 @@ void Puck2D::draw_assets(Canvas& canvas, Rect bounds, const PuckVisual& visual, 
         image_rect.w * breathe_x,
         image_rect.h * breathe_y,
     };
-    canvas.draw_image(image_, sprite_rect, dim);
+    // Overlapping bands blend twice when the Puck is dimmed, so the muted
+    // state keeps the single image and only shifts/scales.
+    if (std::abs(lean) < 0.01f || bands_.empty() || visual.not_listening) {
+        canvas.draw_image(image_, sprite_rect, dim);
+    } else {
+        // Overlap each band by a pixel: adjacent image patterns otherwise
+        // leave a filtered seam line across the body.
+        constexpr float kBandOverlap = 1.0f;
+        for (const Band& band : bands_) {
+            const float band_y = sprite_rect.y + static_cast<float>(band.y) * breathe_y;
+            const float band_height = static_cast<float>(band.height) * breathe_y;
+            const float dx = pose.shear(band_y + band_height * 0.5f);
+            canvas.draw_image(band.image,
+                              Rect{sprite_rect.x + dx, band_y - kBandOverlap * 0.5f,
+                                   sprite_rect.w, band_height + kBandOverlap},
+                              dim);
+        }
+    }
 
     if (!assets.face_ok) {
         return;
@@ -495,6 +617,25 @@ void Puck2D::draw_assets(Canvas& canvas, Rect bounds, const PuckVisual& visual, 
         target_x = 0.45f * std::sin(time * 0.37f) + 0.15f * std::sin(time * 0.91f + 1.7f);
         target_y = 0.12f * std::sin(time * 0.53f + 0.6f);
     }
+    if (interaction.pointer_active && !visual.speaking && !visual.listening &&
+        !visual.thinking && !visual.not_listening) {
+        // The web's eye tracker: aim at the pointer with a reach of
+        // max(160 px, 1.5 x the Puck's width) and fall off to the edge.
+        const float eye_x = image_rect.x + image_rect.w * kPuckEyeX;
+        const float eye_y = image_rect.y + image_rect.h * kPuckEyeY;
+        const float dx = interaction.pointer_x - eye_x;
+        const float dy = interaction.pointer_y - eye_y;
+        const float distance = std::hypot(dx, dy);
+        const float reach = std::max(160.0f, bounds.w * 1.5f);
+        const float amount = std::min(1.0f, distance / reach);
+        if (distance < 1.0f) {
+            target_x = 0.0f;
+            target_y = 0.0f;
+        } else {
+            target_x = dx / distance * amount;
+            target_y = dy / distance * amount;
+        }
+    }
     if (visual.not_listening) {
         target_x = 0.0f;
         target_y = 0.0f;
@@ -508,6 +649,12 @@ void Puck2D::draw_assets(Canvas& canvas, Rect bounds, const PuckVisual& visual, 
         gaze_x_ += (target_x - gaze_x_) * follow;
         gaze_y_ += (target_y - gaze_y_) * follow;
     }
+
+    // The web turns the body toward the smoothed gaze by 0.25 x/y at a 0.6 s
+    // time constant, and drops the turn while a hold is active.
+    const float body_target = interaction.grabbed ? 0.0f : gaze_y_ * 0.08f;
+    body_turn_ += (body_target - body_turn_) *
+                  (first ? 1.0f : 1.0f - std::exp(-dt / 0.6f));
 
     const float blink_phase = std::fmod(time + 1.3f, 4.6f);
     float blink = 0.0f;
@@ -539,7 +686,7 @@ void Puck2D::draw_assets(Canvas& canvas, Rect bounds, const PuckVisual& visual, 
     mouth_open_ = std::clamp(mouth_open_, 0.0f, 1.0f);
 
     const auto draw_eye = [&](const Eye& eye) {
-        const float x = pose.x(eye.x);
+        const float x = pose.x(eye.x, eye.y);
         const float y = pose.y(eye.y);
         const float ax = pose.rx(eye.r) * 1.07f;
         const float ay = pose.ry(eye.r) * 1.07f;
@@ -653,7 +800,7 @@ void Puck2D::draw_assets(Canvas& canvas, Rect bounds, const PuckVisual& visual, 
         const float alpha = std::min(1.0f, mouth_open_ / 0.08f);
         const float halo_center = assets.face.mouth.y + (lower - upper) * 0.5f * scale;
         const float halo_radius = (2.0f * kMouthCanonicalLine + upper + lower) * 0.5f * scale;
-        canvas.fill_ellipse(pose.x(assets.face.mouth.x), pose.y(halo_center),
+        canvas.fill_ellipse(pose.x(assets.face.mouth.x, halo_center), pose.y(halo_center),
                             pose.rx(mouth_half_width * 1.04f), pose.ry(halo_radius * 1.12f),
                             fade(hex(0x0d0f06), 0.30f * alpha * dim));
 
@@ -675,8 +822,10 @@ void Puck2D::draw_assets(Canvas& canvas, Rect bounds, const PuckVisual& visual, 
                 continue;
             }
 
-            const float x0 = pose.x(assets.face.mouth.x + mouth_half_width * n0);
-            const float x1 = pose.x(assets.face.mouth.x + mouth_half_width * n1 + 0.5f);
+            const float mid_y = (y_upper + y_lower) * 0.5f;
+            const float x0 = pose.x(assets.face.mouth.x + mouth_half_width * n0, mid_y);
+            const float x1 =
+                pose.x(assets.face.mouth.x + mouth_half_width * n1 + 0.5f, mid_y);
             const float top = pose.y(y_upper);
             const float bottom = pose.y(y_lower);
             const float height = bottom - top;

@@ -53,12 +53,30 @@ enum class PuckPhase {
     Failed,
 };
 
+// The pointer-interaction pose, in units of the Puck's image height with +y
+// up. The renderers apply it on top of their own breathing and gaze animation;
+// a zero pose is the resting pose.
+struct PuckPose {
+    float shift_x = 0.0f;
+    float lift_y = 0.0f;
+    float roll = 0.0f;
+    float yaw = 0.0f;
+    float pitch = 0.0f;
+    float squash = 0.0f;
+    bool grabbed = false;
+    // True while the pointer has moved recently and should attract the gaze.
+    bool pointer_active = false;
+    float pointer_x = 0.0f;
+    float pointer_y = 0.0f;
+};
+
 struct PuckVisual {
     bool speaking = false;
     bool listening = false;
     bool thinking = false;
     bool not_listening = false;
     float mouth = 0.0f;
+    PuckPose pose;
 };
 
 enum class CallPhase {

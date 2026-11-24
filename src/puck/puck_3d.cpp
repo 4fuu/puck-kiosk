@@ -35,6 +35,10 @@ constexpr const char* kNormalPath = "assets/cache/3d/classic/normal-539ef9bd.web
 constexpr const char* kImagePath = "assets/cache/3d/classic/image-983fb864.webp";
 constexpr int kTextureSize = 512;
 constexpr float kPi = 3.14159265358979323846f;
+// The classic face's eye midpoint as a fraction of the image, used by the
+// pointer gaze. The rig eyes are 196.3/358.3 x 183.8/184.3 on a 498x602 image.
+constexpr float kPuckEyeX = 277.3f / 498.0f;
+constexpr float kPuckEyeY = 184.05f / 602.0f;
 
 constexpr const char* kPartVertexShader = R"(#version 300 es
 precision highp float;
@@ -920,6 +924,8 @@ struct Animation {
     float last_time = -1.0f;
     float gaze_x = 0.0f;
     float gaze_y = 0.0f;
+    float body_yaw = 0.0f;
+    float body_pitch = 0.0f;
     float lids = 0.0f;
     float mouth = 0.0f;
     float spotlight = 0.0f;
@@ -958,6 +964,7 @@ struct Puck3D::Impl {
     GLuint image = 0;
     GLuint empty_vao = 0;
     Offscreen offscreen;
+    Rect stage;
     Animation animation;
     std::size_t gpu_buffer_bytes = 0;
     std::size_t texture_bytes = 0;
@@ -991,13 +998,16 @@ Mat4 body_model(const PuckRig& rig, float squash, float yaw, float pitch, float 
     return model;
 }
 
-Mat4 projection_for(const PuckRig& rig, int width, int height) {
-    const float fit = std::min(static_cast<float>(width) / static_cast<float>(rig.width),
-                               static_cast<float>(height) / static_cast<float>(rig.height));
-    const float half_width = static_cast<float>(width) / fit * 0.5f;
-    const float half_height = static_cast<float>(height) / fit * 0.5f;
-    const float center_x = static_cast<float>(rig.width) * 0.5f;
-    const float center_y = -static_cast<float>(rig.height) * 0.5f;
+// `fit` is the Puck's own pixels-per-scene-unit scale, and the offsets are the
+// screen offset from the target center to the Puck's layout center. Keeping the
+// fit independent of the target size lets the target grow for the drag room
+// without resizing the Puck.
+Mat4 projection_for(const PuckRig& rig, float width, float height, float fit, float offset_x,
+                    float offset_y) {
+    const float half_width = width / fit * 0.5f;
+    const float half_height = height / fit * 0.5f;
+    const float center_x = static_cast<float>(rig.width) * 0.5f - offset_x / fit;
+    const float center_y = -static_cast<float>(rig.height) * 0.5f + offset_y / fit;
     return orthographic(center_x - half_width, center_x + half_width, center_y - half_height,
                         center_y + half_height, -2000.0f, 2000.0f);
 }
@@ -1139,7 +1149,8 @@ void Puck3D::Impl::destroy() {
 
 namespace {
 
-void update_animation(Animation* animation, const PuckVisual& visual, float time_seconds) {
+void update_animation(Animation* animation, const PuckVisual& visual, float time_seconds,
+                      float eye_x, float eye_y, float reach) {
     const bool first = animation->last_time < 0.0f;
     const float dt = first ? 0.0f
                            : std::min(0.1f, std::max(0.0f, time_seconds - animation->last_time));
@@ -1160,6 +1171,20 @@ void update_animation(Animation* animation, const PuckVisual& visual, float time
                    0.15f * std::sin(time_seconds * 0.91f + 1.7f);
         target_y = 0.12f * std::sin(time_seconds * 0.53f + 0.6f);
     }
+    if (visual.pose.pointer_active && !visual.speaking && !visual.listening &&
+        !visual.thinking && !visual.not_listening) {
+        const float dx = visual.pose.pointer_x - eye_x;
+        const float dy = visual.pose.pointer_y - eye_y;
+        const float distance = std::hypot(dx, dy);
+        const float amount = std::min(1.0f, distance / std::max(1.0f, reach));
+        if (distance < 1.0f) {
+            target_x = 0.0f;
+            target_y = 0.0f;
+        } else {
+            target_x = dx / distance * amount;
+            target_y = dy / distance * amount;
+        }
+    }
     if (first) {
         animation->gaze_x = target_x;
         animation->gaze_y = target_y;
@@ -1168,6 +1193,14 @@ void update_animation(Animation* animation, const PuckVisual& visual, float time
         animation->gaze_x += (target_x - animation->gaze_x) * follow;
         animation->gaze_y += (target_y - animation->gaze_y) * follow;
     }
+
+    // The web turns the body toward the smoothed gaze at a 0.6 s time
+    // constant, and drops the turn while a hold is active.
+    const float body_follow = first ? 1.0f : 1.0f - std::exp(-dt / 0.6f);
+    const float body_target_yaw = visual.pose.grabbed ? 0.0f : animation->gaze_x * 0.25f;
+    const float body_target_pitch = visual.pose.grabbed ? 0.0f : animation->gaze_y * 0.08f;
+    animation->body_yaw += (body_target_yaw - animation->body_yaw) * body_follow;
+    animation->body_pitch += (body_target_pitch - animation->body_pitch) * body_follow;
 
     const float blink_phase = std::fmod(time_seconds + 1.3f, 4.6f);
     float blink = 0.0f;
@@ -1225,24 +1258,46 @@ void Puck3D::Impl::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual,
     if (!ready || failed || bounds.w <= 0.0f || bounds.h <= 0.0f) {
         return;
     }
-    update_animation(&animation, visual, std::max(0.0f, time_seconds));
+    const float fit = std::min(bounds.w / static_cast<float>(rig.width),
+                               bounds.h / static_cast<float>(rig.height));
+    const float image_width = fit * static_cast<float>(rig.width);
+    const float image_height = fit * static_cast<float>(rig.height);
+    const float image_left = bounds.center_x() - image_width * 0.5f;
+    const float image_top = bounds.center_y() - image_height * 0.5f;
+    update_animation(&animation, visual, std::max(0.0f, time_seconds),
+                     image_left + image_width * kPuckEyeX,
+                     image_top + image_height * kPuckEyeY,
+                     std::max(160.0f, bounds.w * 1.5f));
 
     GLint surface[4] = {0, 0, 0, 0};
     glGetIntegerv(GL_VIEWPORT, surface);
     if (surface[2] <= 0 || surface[3] <= 0) {
         return;
     }
-    const int x0 = std::max(0, std::min(surface[2], static_cast<int>(std::floor(bounds.x))));
-    const int y0 = std::max(0, std::min(surface[3], static_cast<int>(std::floor(bounds.y))));
-    const int x1 = std::max(x0, std::min(surface[2], static_cast<int>(std::ceil(bounds.x + bounds.w))));
-    const int y1 = std::max(y0, std::min(surface[3], static_cast<int>(std::ceil(bounds.y + bounds.h))));
-    const int width = x1 - x0;
-    const int height = y1 - y0;
-    if (width <= 0 || height <= 0) {
+    // The web's play canvas extends 15% past each side, 55% above, and 12%
+    // below the Puck so a grabbed body is not clipped. Use the stage plus the
+    // same margins; the projection keeps the Puck at its layout position.
+    const float pad_x = 0.15f * bounds.w;
+    const float pad_top = 0.55f * bounds.h;
+    const float pad_bottom = 0.12f * bounds.h;
+    Rect target = stage;
+    if (target.w <= 0.0f || target.h <= 0.0f) {
+        target = Rect{bounds.x - pad_x, bounds.y - pad_top, bounds.w + pad_x * 2.0f,
+                      bounds.h + pad_top + pad_bottom};
+    } else {
+        target = Rect{target.x - pad_x, target.y - pad_top, target.w + pad_x * 2.0f,
+                      target.h + pad_top + pad_bottom};
+    }
+    const int target_width = static_cast<int>(std::ceil(target.w));
+    const int target_height = static_cast<int>(std::ceil(target.h));
+    if (target_width <= 0 || target_height <= 0) {
         return;
     }
-    const int viewport_x = surface[0] + x0;
-    const int viewport_y = surface[1] + (surface[3] - y1);
+    const float offset_x = bounds.center_x() - target.center_x();
+    const float offset_y = bounds.center_y() - target.center_y();
+    const int viewport_x = surface[0] + static_cast<int>(std::floor(target.x));
+    const int viewport_y = surface[1] + surface[3] - static_cast<int>(std::floor(target.y)) -
+                           target_height;
 
     GLint surface_framebuffer = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &surface_framebuffer);
@@ -1255,7 +1310,7 @@ void Puck3D::Impl::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual,
     canvas.flush();
 
     std::string detail;
-    if (!ensure_offscreen(&offscreen, width, height, &detail)) {
+    if (!ensure_offscreen(&offscreen, target_width, target_height, &detail)) {
         log::error("puck-3d: %s; keeping the 2D layer", detail.c_str());
         failed = true;
         glBindFramebuffer(GL_FRAMEBUFFER, surface_framebuffer);
@@ -1263,7 +1318,7 @@ void Puck3D::Impl::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual,
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, offscreen.framebuffer);
-    glViewport(0, 0, width, height);
+    glViewport(0, 0, target_width, target_height);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_STENCIL_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -1279,14 +1334,24 @@ void Puck3D::Impl::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual,
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
-    const Mat4 projection = projection_for(rig, width, height);
+    const Mat4 projection = projection_for(rig, static_cast<float>(target_width),
+                                           static_cast<float>(target_height), fit, offset_x,
+                                           offset_y);
     const float breathing = visual.speaking
                                 ? 0.0f
                                 : std::sin(2.0f * kPi * time_seconds / 3.2f) *
                                       std::sin(2.0f * kPi * time_seconds / 8.0f);
-    const float squash = 1.0f - 0.018f * breathing;
-    const float roll = 0.03f * std::sin(2.0f * kPi * 0.8f * time_seconds) * animation.spotlight;
-    const Mat4 body_transform = body_model(rig, squash, 0.0f, 0.0f, roll, 0.0f, 0.0f);
+    const PuckPose& interaction = visual.pose;
+    const float squash = std::max(
+        0.2f, (1.0f - 0.018f * breathing) * (1.0f + interaction.squash));
+    const float roll =
+        0.03f * std::sin(2.0f * kPi * 0.8f * time_seconds) * animation.spotlight +
+        interaction.roll;
+    const float yaw = interaction.yaw + animation.body_yaw;
+    const float pitch = interaction.pitch + animation.body_pitch;
+    const float slide = interaction.shift_x * static_cast<float>(rig.height);
+    const float lift = interaction.lift_y * static_cast<float>(rig.height);
+    const Mat4 body_transform = body_model(rig, squash, yaw, pitch, roll, slide, lift);
     float body_normal[9];
     normal_matrix(body_transform, body_normal);
 
@@ -1325,8 +1390,8 @@ void Puck3D::Impl::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual,
         spotlight_program.set_vec3("uPool", pool_width, pool_height, ground_y - center_y);
         spotlight_program.set_vec3("uSpotColor", kSpotColor);
         spotlight_program.set_float("uSpotlight", animation.spotlight);
-        spotlight_program.set_vec2("uViewport", static_cast<float>(width),
-                                   static_cast<float>(height));
+        spotlight_program.set_vec2("uViewport", static_cast<float>(target_width),
+                                   static_cast<float>(target_height));
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
         glDisable(GL_CULL_FACE);
@@ -1395,7 +1460,7 @@ void Puck3D::Impl::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual,
     glBindVertexArray(0);
 
     glBindFramebuffer(GL_FRAMEBUFFER, surface_framebuffer);
-    glViewport(viewport_x, viewport_y, width, height);
+    glViewport(viewport_x, viewport_y, target_width, target_height);
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
     glDisable(GL_CULL_FACE);
@@ -1433,6 +1498,10 @@ Puck3D::~Puck3D() = default;
 
 bool Puck3D::initialize(std::string* error) {
     return impl_->initialize(error);
+}
+
+void Puck3D::set_stage(Rect stage) {
+    impl_->stage = stage;
 }
 
 void Puck3D::draw(Canvas& canvas, Rect bounds, const PuckVisual& visual, float time_seconds) {

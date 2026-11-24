@@ -18,6 +18,7 @@ public:
     const char* name() const override { return "puck-3d"; }
     bool is_3d() const override { return true; }
     bool initialize(std::string* error) override;
+    void set_stage(Rect stage) override;
     void draw(Canvas& canvas, Rect bounds, const PuckVisual& visual, float time_seconds) override;
 
 private:

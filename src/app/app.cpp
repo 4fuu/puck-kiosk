@@ -12,6 +12,7 @@
 #include "core/log.h"
 #include "platform/audio.h"
 #include "platform/http.h"
+#include "puck/puck_interaction.h"
 #include "puck/puck_view.h"
 #include "render/renderer.h"
 #include "voice/aec.h"
@@ -242,6 +243,8 @@ struct ScriptHooks {
     std::function<bool()> dismiss;
     std::function<void()> toggle_debug;
     std::function<void(const InputEvent&)> observe;
+    // Pointer events for the Puck interaction; `now` is the script or app time.
+    std::function<void(const InputEvent&, float)> pointer;
     float* clock = nullptr;
 };
 
@@ -299,6 +302,9 @@ bool apply_input_script(const std::vector<ScriptedInput>& script, const ScriptHo
         }
         if (hooks.observe) {
             hooks.observe(entry.event);
+        }
+        if (hooks.pointer) {
+            hooks.pointer(entry.event, now);
         }
         if (hooks.focus) {
             const std::string before = focus_label(*hooks.focus);
@@ -511,6 +517,7 @@ int run_demo_screen(const AppOptions& options, Platform& platform, Renderer& ren
     UiFocus focus;
     focus.set_hit_map(&ui.hit_map());
     float demo_time = 0.0f;
+    PuckInteraction puck_interaction;
 
     if (!options.demo_plugin.empty()) {
         std::string plugin_text;
@@ -543,7 +550,11 @@ int run_demo_screen(const AppOptions& options, Platform& platform, Renderer& ren
     }
 
     auto sync = [&]() {
-        ui.set_visual(visual);
+        puck_interaction.set_bounds(ui.puck_bounds(), ui.puck_stage());
+        puck_interaction.update(demo_time);
+        PuckVisual posed = visual;
+        posed.pose = puck_interaction.pose();
+        ui.set_visual(posed);
         ui.set_call(view);
         ui.set_sheet(plugins.sheet());
         ui.set_passkey(passkey.view());
@@ -568,6 +579,9 @@ int run_demo_screen(const AppOptions& options, Platform& platform, Renderer& ren
     if (options.dump_targets) {
         dump_targets(ui.hit_map());
     }
+    // The first sync ran before the layout existed; the render just filled in
+    // the Puck rect, so hand it to the interaction before scripted input.
+    puck_interaction.set_bounds(ui.puck_bounds(), ui.puck_stage());
 
     UiActionHandlers handlers;
     handlers.call = [&]() {
@@ -642,6 +656,10 @@ int run_demo_screen(const AppOptions& options, Platform& platform, Renderer& ren
             diagnostics.open();
         }
     };
+    auto puck_input_allowed = [&]() {
+        return !diagnostics.is_open() && !plugins.visible() && !media.visible() &&
+               passkey.view().mode == PasskeyMode::Hidden;
+    };
     ScriptHooks hooks;
     hooks.router = &router;
     hooks.focus = &focus;
@@ -664,6 +682,18 @@ int run_demo_screen(const AppOptions& options, Platform& platform, Renderer& ren
     hooks.dismiss = dismiss_overlay;
     hooks.toggle_debug = toggle_debug;
     hooks.observe = [&](const InputEvent& event) { ui.notify_input(event); };
+    hooks.pointer = [&](const InputEvent& event, float now) {
+        puck_interaction.set_bounds(ui.puck_bounds(), ui.puck_stage());
+        if (event.type == InputEvent::Type::PointerDown) {
+            if (!ui.hit_map().hit(event.x, event.y) && puck_input_allowed()) {
+                puck_interaction.pointer_down(event.x, event.y, now);
+            }
+        } else if (event.type == InputEvent::Type::PointerMove) {
+            puck_interaction.pointer_move(event.x, event.y, now);
+        } else if (event.type == InputEvent::Type::PointerUp) {
+            puck_interaction.pointer_up(event.x, event.y, now);
+        }
+    };
     hooks.clock = &demo_time;
     apply_input_script(options.input_script, hooks);
 
@@ -753,6 +783,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
     focus.set_hit_map(&ui.hit_map());
     float script_time = 0.0f;
     bool use_script_time = false;
+    PuckInteraction puck_interaction;
     auto ui_time = [&]() { return use_script_time ? script_time : elapsed_seconds(); };
     auto render = [&](bool present) {
         platform.display->make_current();
@@ -791,6 +822,11 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
     };
 
     auto sync_pairing = [&]() {
+        puck_interaction.set_bounds(ui.puck_bounds(), ui.puck_stage());
+        puck_interaction.update(ui_time());
+        PuckVisual posed;
+        posed.pose = puck_interaction.pose();
+        ui.set_visual(posed);
         ui.set_sheet(PluginSheet{});
         ui.set_passkey(PasskeyView{});
         ui.set_debug(diagnostics.view());
@@ -809,6 +845,22 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
             diagnostics.open();
         }
     };
+    auto puck_input_allowed = [&]() {
+        return !diagnostics.is_open() && !plugins.visible() && !media.visible() &&
+               passkey.view().mode == PasskeyMode::Hidden;
+    };
+    auto handle_puck_pointer = [&](const InputEvent& event, float now) {
+        puck_interaction.set_bounds(ui.puck_bounds(), ui.puck_stage());
+        if (event.type == InputEvent::Type::PointerDown) {
+            if (!ui.hit_map().hit(event.x, event.y) && puck_input_allowed()) {
+                puck_interaction.pointer_down(event.x, event.y, now);
+            }
+        } else if (event.type == InputEvent::Type::PointerMove) {
+            puck_interaction.pointer_move(event.x, event.y, now);
+        } else if (event.type == InputEvent::Type::PointerUp) {
+            puck_interaction.pointer_up(event.x, event.y, now);
+        }
+    };
     auto poll_debug_input = [&]() {
         const UiFocusResult hold = focus.update(elapsed_seconds());
         if (hold.action != UiAction::None) {
@@ -823,6 +875,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
                 dirty = true;
             }
             const float now = elapsed_seconds();
+            handle_puck_pointer(event, now);
             const std::string before = focus_label(focus);
             const UiFocusResult focus_result = focus.handle(event, now);
             const bool consumed = apply_focus_result(
@@ -903,6 +956,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         hooks.dismiss = dismiss_overlay;
         hooks.toggle_debug = toggle_debug;
         hooks.observe = [&](const InputEvent& event) { ui.notify_input(event); };
+        hooks.pointer = handle_puck_pointer;
         hooks.clock = &script_time;
         if (apply_input_script(options.input_script, hooks)) {
             return 0;
@@ -970,6 +1024,9 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
             }
         }
 
+        if (puck_interaction.active()) {
+            dirty = true;
+        }
         // Headless has no input and writes a PPM per frame, so only re-render
         // while the debug panel is open there.
         const bool headless = std::string(platform.display->backend_name()) == "headless";
@@ -1159,17 +1216,22 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
     };
 
     auto sync_car = [&]() {
+        PuckVisual visual;
+        if (call) {
+            visual = call->visual();
+        }
+        puck_interaction.set_bounds(ui.puck_bounds(), ui.puck_stage());
+        puck_interaction.update(ui_time());
+        visual.pose = puck_interaction.pose();
         if (call) {
             ui.set_call(call->view());
-            ui.set_visual(call->visual());
         } else if (ended_view.phase == CallPhase::Ended ||
                    ended_view.phase == CallPhase::Failed) {
             ui.set_call(ended_view);
-            ui.set_visual(PuckVisual{});
         } else {
             ui.set_call(CallView{});
-            ui.set_visual(PuckVisual{});
         }
+        ui.set_visual(visual);
         ui.set_sheet(plugins.sheet());
         ui.set_passkey(passkey.view());
         ui.set_debug(diagnostics.view());
@@ -1348,6 +1410,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
         hooks.dismiss = dismiss_car_overlay;
         hooks.toggle_debug = toggle_car_debug;
         hooks.observe = [&](const InputEvent& event) { ui.notify_input(event); };
+        hooks.pointer = handle_puck_pointer;
         hooks.clock = &script_time;
         if (apply_input_script(options.input_script, hooks)) {
             quit = true;
@@ -1365,6 +1428,15 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
             return 0;
         }
         use_script_time = false;
+    }
+
+    if (options.input_script.empty()) {
+        // Fill in the car layout before the first input poll so the Puck
+        // interaction does not use the pairing screen's rect.
+        update_passkey_context();
+        sync_car();
+        render(false);
+        sync_car();
     }
 
     bool running = !quit;
@@ -1398,6 +1470,7 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
                 car_dirty = true;
             }
             const float now = elapsed_seconds();
+            handle_puck_pointer(event, now);
             const std::string before = focus_label(focus);
             const UiFocusResult focus_result = focus.handle(event, now);
             const bool consumed = apply_focus_result(
@@ -1514,6 +1587,10 @@ int run_pairing(const AppOptions& options, Platform& platform, Renderer& rendere
 
         if (focus.hold_active() &&
             Clock::now() - last_car_render >= std::chrono::milliseconds(33)) {
+            car_dirty = true;
+        }
+        if (puck_interaction.active() &&
+            Clock::now() - last_car_render >= std::chrono::milliseconds(16)) {
             car_dirty = true;
         }
 
@@ -1659,6 +1736,7 @@ int App::run(const AppOptions& options) {
     UiInputRouter router;
     UiFocus focus;
     focus.set_hit_map(&ui.hit_map());
+    PuckInteraction puck_interaction;
     UiActionHandlers handlers;
     handlers.debug_open = [&]() { diagnostics.open(); };
     handlers.debug_close = [&]() { diagnostics.close(); };
@@ -1685,6 +1763,18 @@ int App::run(const AppOptions& options) {
             diagnostics.open();
         }
     };
+    auto handle_puck_pointer = [&](const InputEvent& event, float now) {
+        puck_interaction.set_bounds(ui.puck_bounds(), ui.puck_stage());
+        if (event.type == InputEvent::Type::PointerDown) {
+            if (!ui.hit_map().hit(event.x, event.y) && !diagnostics.is_open()) {
+                puck_interaction.pointer_down(event.x, event.y, now);
+            }
+        } else if (event.type == InputEvent::Type::PointerMove) {
+            puck_interaction.pointer_move(event.x, event.y, now);
+        } else if (event.type == InputEvent::Type::PointerUp) {
+            puck_interaction.pointer_up(event.x, event.y, now);
+        }
+    };
 
     while (running && !platform->display->should_close()) {
         const float elapsed =
@@ -1696,6 +1786,7 @@ int App::run(const AppOptions& options) {
         InputEvent event;
         while (platform->input && platform->input->poll(event)) {
             ui.notify_input(event);
+            handle_puck_pointer(event, elapsed);
             const UiFocusResult focus_result = focus.handle(event, elapsed);
             if (apply_focus_result(focus_result, handlers, dismiss_overlay, toggle_debug,
                                    nullptr)) {
@@ -1722,6 +1813,11 @@ int App::run(const AppOptions& options) {
         }
 
         ui.set_debug(diagnostics.view());
+        puck_interaction.set_bounds(ui.puck_bounds(), ui.puck_stage());
+        puck_interaction.update(elapsed);
+        PuckVisual visual;
+        visual.pose = puck_interaction.pose();
+        ui.set_visual(visual);
         platform->display->make_current();
         media.poll();
         focus.sync();

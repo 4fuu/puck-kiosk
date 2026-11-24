@@ -17,6 +17,10 @@ public:
     virtual const char* name() const = 0;
     virtual bool is_3d() const = 0;
     virtual bool initialize(std::string* error) = 0;
+    // The area the Puck may be dragged across. Puck3D sizes its offscreen
+    // target to it so a grabbed Puck is not clipped at its layout rect; the
+    // 2D renderer draws directly and ignores it.
+    virtual void set_stage(Rect stage) { (void)stage; }
     virtual void draw(Canvas& canvas, Rect bounds, const PuckVisual& visual, float time_seconds) = 0;
 };
 

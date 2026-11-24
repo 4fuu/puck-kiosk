@@ -953,6 +953,8 @@ void CarUi::draw(Canvas& canvas, Size size, float time_seconds) {
     }
     debug_was_open_ = debug_.open;
     hits_.clear();
+    puck_bounds_ = {};
+    puck_stage_ = {};
     if (debug_.open) {
         draw_debug(canvas, size);
     } else if (call_mode_) {
@@ -970,6 +972,9 @@ void CarUi::draw_pairing(Canvas& canvas, Size size, float time_seconds) {
     const float puck_y = layout.portrait ? layout.stage.y + layout.stage.h - puck_size
                                          : layout.stage.y + (layout.stage.h - puck_size) * 0.5f;
     const Rect puck{layout.stage.center_x() - puck_size * 0.5f, puck_y, puck_size, puck_size};
+    puck_bounds_ = puck;
+    puck_stage_ = layout.stage;
+    puck_.set_stage(puck_stage_);
     puck_.draw(canvas, puck, visual_, time_seconds);
 
     if (!title_.empty()) {
@@ -1013,6 +1018,9 @@ void CarUi::draw_call(Canvas& canvas, Size size, float time_seconds) {
         visual.thinking = call_.thinking;
         visual.not_listening = call_.muted;
         visual.mouth = call_.mouth;
+        puck_bounds_ = layout.puck;
+        puck_stage_ = layout.main;
+        puck_.set_stage(puck_stage_);
         puck_.draw(canvas, layout.puck, visual, time_seconds);
         draw_call_caption(canvas, layout, call_);
     }

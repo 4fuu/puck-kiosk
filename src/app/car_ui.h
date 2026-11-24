@@ -39,6 +39,11 @@ public:
     // Rects drawn by the last frame. The app hit-tests input against them.
     const UiHitMap& hit_map() const { return hits_; }
 
+    // The Puck's draw rect and the stage it may be dragged across. Empty when
+    // the Puck is not on screen (a sheet or the debug panel is covering it).
+    Rect puck_bounds() const { return puck_bounds_; }
+    Rect puck_stage() const { return puck_stage_; }
+
 private:
     void draw_pairing(Canvas& canvas, Size size, float time_seconds);
     void draw_call(Canvas& canvas, Size size, float time_seconds);
@@ -63,6 +68,8 @@ private:
     PasskeyView passkey_;
     DebugView debug_;
     UiHitMap hits_;
+    Rect puck_bounds_;
+    Rect puck_stage_;
     UiFocusView focus_;
     bool hints_visible_ = false;
     // The Debug entry stays invisible in normal use: hold the bottom-left
