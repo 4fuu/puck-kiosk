@@ -1,7 +1,7 @@
-#include "nanovg_gl3_functions.h"
-
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+
+#include "nanovg_gl3_functions.h"
 
 NVGgl3Functions nvg_gl3 = {};
 

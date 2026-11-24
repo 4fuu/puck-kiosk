@@ -65,6 +65,7 @@ target("nanovg")
     if win32 then
         add_files("third_party/nanovg/nanovg.c", "third_party/nanovg/nanovg_gl3.c")
         add_syslinks("opengl32")
+        add_includedirs("third_party/gl-headers", { public = true })
     else
         add_files("third_party/nanovg/nanovg.c", "third_party/nanovg/nanovg_gles3.c")
     end
@@ -85,6 +86,7 @@ target("puck-kiosk")
         remove_files("src/puck/puck_3d*.cpp")
         add_packages("libcurl", "libwebp", "libpng", "libjpeg", "libqrencode",
                      "libopus", "ixwebsocket", "libdatachannel")
+        add_includedirs("third_party/gl-headers")
         add_links("opengl32", "gdi32", "user32", "ole32", "winmm", "uuid", "ws2_32", "crypt32",
                   "iphlpapi", "bcrypt", "secur32", "advapi32", "wldap32", "mmdevapi")
         if is_plat("mingw") then

@@ -2,6 +2,16 @@
 
 #include "core/log.h"
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include <nanovg.h>
 #if defined(PUCK_KIOSK_CANVAS_NANOVG_GL3)
 #include <nanovg_gl3_api.h>
