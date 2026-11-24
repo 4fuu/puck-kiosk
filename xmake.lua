@@ -125,7 +125,8 @@ target("puck-kiosk")
             add_cxflags("-Wno-cast-function-type")
         elseif is_plat("windows") then
             -- link.exe infers WinMain from /SUBSYSTEM:WINDOWS; keep main().
-            add_ldflags("/ENTRY:mainCRTStartup")
+            -- xmake filters /ENTRY out of ldflags unless forced.
+            add_ldflags("/ENTRY:mainCRTStartup", {force = true})
         end
         add_rules("puck-kiosk.win32.icon")
     else
