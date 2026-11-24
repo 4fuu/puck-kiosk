@@ -26,6 +26,17 @@ namespace {
 
 constexpr const char* kUserAgent = "puck-kiosk/0.1";
 
+// Browsers open about six connections per host. Sibling chunks are fetched in
+// batches of this size so one slow chunk does not serialize the rest.
+constexpr std::size_t kFetchBatch = 6;
+constexpr std::size_t kMaxChunkFetches = 48;
+
+using Clock = std::chrono::steady_clock;
+
+long long elapsed_ms(Clock::time_point started) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count();
+}
+
 std::string strip_trailing_slash(std::string value) {
     while (value.size() > 1 && value.back() == '/') {
         value.pop_back();
@@ -145,6 +156,17 @@ bool http_get(HttpClient& http, const std::string& url, std::string* body, std::
         *body = std::move(response.body);
     }
     return true;
+}
+
+HttpRequest make_get_request(const std::string& url) {
+    HttpRequest request;
+    request.method = "GET";
+    request.url = url;
+    request.headers = {
+        {"Accept", "text/html,application/javascript,*/*"},
+        {"User-Agent", kUserAgent},
+    };
+    return request;
 }
 
 std::string extract_remote_hash(const std::string& content) {
@@ -555,90 +577,197 @@ bool PairingSession::start(std::string* error) {
     if (error) {
         error->clear();
     }
+    const auto started = Clock::now();
     state_ = PairingState::Idle;
     remote_hash_.clear();
     if (!resolve_remote_hash(error)) {
         return false;
     }
+    const auto hash_done = Clock::now();
     if (!regenerate_challenge(error)) {
         return false;
     }
+    log::info("startup: challenge generated in %lld ms", elapsed_ms(hash_done));
+    log::info("startup: pairing prepared in %lld ms", elapsed_ms(started));
     state_ = PairingState::Waiting;
     return true;
 }
 
 bool PairingSession::resolve_remote_hash(std::string* error) {
+    const auto started = Clock::now();
     std::string page;
-    std::string page_error;
-    if (!http_get(http_, options_.origin + "/car", &page, &page_error)) {
-        log::warn("cannot inspect /car (%s); using fallback remote hash %s", page_error.c_str(),
-                  options_.fallback_hash.c_str());
-        remote_hash_ = options_.fallback_hash;
+    if (!cached_car_page_.empty()) {
+        page = std::move(cached_car_page_);
+        cached_car_page_.clear();
+        log::info("startup: /car page reused from session validation");
+    } else {
+        const auto page_started = Clock::now();
+        std::string page_error;
+        if (!http_get(http_, options_.origin + "/car", &page, &page_error)) {
+            log::warn("cannot inspect /car (%s); using fallback remote hash %s",
+                      page_error.c_str(), options_.fallback_hash.c_str());
+            remote_hash_ = options_.fallback_hash;
+            return true;
+        }
+        log::info("startup: GET /car %lld ms", elapsed_ms(page_started));
+    }
+
+    // A build that inlines the remote reference into the page saves the whole
+    // module walk; check the page before requesting any chunk.
+    const std::string page_hash = extract_remote_hash(page);
+    if (!page_hash.empty()) {
+        remote_hash_ = page_hash;
+        log::info("resolved SvelteKit remote hash: %s", remote_hash_.c_str());
+        log::info("startup: remote hash resolved from /car in %lld ms", elapsed_ms(started));
         return true;
     }
 
     std::vector<std::string> node_urls;
+    std::unordered_set<std::string> seen;
     const std::regex node_re(R"((/_app/immutable/nodes/[A-Za-z0-9._-]+\.js))");
     for (std::sregex_iterator it(page.begin(), page.end(), node_re), end; it != end; ++it) {
-        node_urls.push_back(options_.origin + it->str(1));
+        const std::string url = options_.origin + it->str(1);
+        if (seen.insert(url).second) {
+            node_urls.push_back(url);
+        }
     }
 
     const std::regex import_re(R"((?:from\s*|import\s*\(\s*)["']([^"']+\.js)["'])");
     std::vector<std::string> car_imports;
     std::vector<std::string> other_imports;
-    for (const auto& node_url : node_urls) {
-        std::string content;
-        std::string fetch_error;
-        if (!http_get(http_, node_url, &content, &fetch_error)) {
-            log::warn("cannot inspect %s: %s", redact_url(node_url).c_str(), fetch_error.c_str());
-            continue;
+    std::size_t node_requests = 0;
+
+    auto fetch = [&](const std::vector<std::string>& urls) {
+        std::vector<HttpRequest> requests;
+        requests.reserve(urls.size());
+        for (const std::string& url : urls) {
+            requests.push_back(make_get_request(url));
         }
-        const std::string hash = extract_remote_hash(content);
-        if (!hash.empty()) {
-            remote_hash_ = hash;
-            log::info("resolved SvelteKit remote hash: %s", remote_hash_.c_str());
-            return true;
+        return http_.request_many(requests);
+    };
+
+    // The layout and page nodes are independent. One batch fetches them
+    // together over the connection cache instead of one round trip each.
+    const auto nodes_started = Clock::now();
+    for (std::size_t offset = 0; offset < node_urls.size(); offset += kFetchBatch) {
+        const std::size_t end = std::min(offset + kFetchBatch, node_urls.size());
+        const std::vector<std::string> batch(node_urls.begin() + static_cast<std::ptrdiff_t>(offset),
+                                             node_urls.begin() + static_cast<std::ptrdiff_t>(end));
+        const std::vector<HttpBatchResponse> results = fetch(batch);
+        node_requests += batch.size();
+        for (std::size_t i = 0; i < batch.size(); ++i) {
+            if (!results[i].error.empty()) {
+                log::warn("cannot inspect %s: %s", redact_url(batch[i]).c_str(),
+                          results[i].error.c_str());
+                continue;
+            }
+            if (results[i].response.status != 200) {
+                log::warn("cannot inspect %s: HTTP %d", redact_url(batch[i]).c_str(),
+                          results[i].response.status);
+                continue;
+            }
+            const std::string& content = results[i].response.body;
+            const std::string hash = extract_remote_hash(content);
+            if (!hash.empty()) {
+                remote_hash_ = hash;
+                log::info("resolved SvelteKit remote hash: %s", remote_hash_.c_str());
+                log::info("startup: node scripts %zu requests %lld ms", node_requests,
+                          elapsed_ms(nodes_started));
+                log::info("startup: remote hash resolved after %zu requests, %lld ms",
+                          node_requests, elapsed_ms(started));
+                return true;
+            }
+            const bool is_car_node = content.find("/api/car/session") != std::string::npos;
+            auto& imports = is_car_node ? car_imports : other_imports;
+            for (std::sregex_iterator it(content.begin(), content.end(), import_re), end;
+                 it != end; ++it) {
+                const std::string url = resolve_url(batch[i], it->str(1));
+                if (seen.find(url) == seen.end()) {
+                    imports.push_back(url);
+                }
+            }
         }
-        const bool is_car_node = content.find("/api/car/session") != std::string::npos;
-        auto& imports = is_car_node ? car_imports : other_imports;
-        for (std::sregex_iterator it(content.begin(), content.end(), import_re), end; it != end;
-             ++it) {
-            imports.push_back(resolve_url(node_url, it->str(1)));
-        }
+    }
+    if (node_requests > 0) {
+        log::info("startup: node scripts %zu requests %lld ms", node_requests,
+                  elapsed_ms(nodes_started));
     }
 
     std::vector<std::string> pending = car_imports.empty() ? other_imports : car_imports;
-    std::unordered_set<std::string> seen;
     std::size_t fetched = 0;
-    while (!pending.empty() && fetched < 48) {
-        const std::string url = pending.back();
-        pending.pop_back();
-        if (!seen.insert(url).second) {
-            continue;
+    std::size_t waves = 0;
+    while (fetched < kMaxChunkFetches) {
+        std::vector<std::string> batch;
+        while (batch.size() < kFetchBatch && fetched + batch.size() < kMaxChunkFetches) {
+            std::string url;
+            bool took = false;
+            while (!pending.empty()) {
+                url = std::move(pending.back());
+                pending.pop_back();
+                if (seen.insert(url).second) {
+                    took = true;
+                    break;
+                }
+            }
+            if (!took) {
+                break;
+            }
+            batch.push_back(std::move(url));
         }
-        ++fetched;
-
-        std::string content;
-        std::string fetch_error;
-        if (!http_get(http_, url, &content, &fetch_error)) {
-            log::warn("cannot inspect %s: %s", redact_url(url).c_str(), fetch_error.c_str());
-            continue;
+        if (batch.empty()) {
+            break;
         }
-        const std::string hash = extract_remote_hash(content);
-        if (!hash.empty()) {
-            remote_hash_ = hash;
+        ++waves;
+        const auto wave_started = Clock::now();
+        const std::vector<HttpBatchResponse> results = fetch(batch);
+        fetched += batch.size();
+        std::string found;
+        // Results are ordered highest priority first. Process the middle
+        // first and the two ends last, so the next wave advances both the
+        // first and the last branch: a depth-first walk that hedges on where
+        // the hash sits in the import order.
+        for (std::size_t step = 0; step < batch.size(); ++step) {
+            const std::size_t i = (step + 1) % batch.size();
+            if (!results[i].error.empty()) {
+                log::warn("cannot inspect %s: %s", redact_url(batch[i]).c_str(),
+                          results[i].error.c_str());
+                continue;
+            }
+            if (results[i].response.status != 200) {
+                log::warn("cannot inspect %s: HTTP %d", redact_url(batch[i]).c_str(),
+                          results[i].response.status);
+                continue;
+            }
+            const std::string& content = results[i].response.body;
+            const std::string hash = extract_remote_hash(content);
+            if (!hash.empty()) {
+                found = hash;
+                break;
+            }
+            for (std::sregex_iterator it(content.begin(), content.end(), import_re), end;
+                 it != end; ++it) {
+                const std::string url = resolve_url(batch[i], it->str(1));
+                if (seen.find(url) == seen.end()) {
+                    pending.push_back(url);
+                }
+            }
+        }
+        log::info("startup: chunk wave %zu: %zu requests %lld ms", waves, batch.size(),
+                  elapsed_ms(wave_started));
+        if (!found.empty()) {
+            remote_hash_ = found;
             log::info("resolved SvelteKit remote hash: %s", remote_hash_.c_str());
+            log::info("startup: remote hash resolved after %zu requests in %zu waves, %lld ms",
+                      node_requests + fetched, waves, elapsed_ms(started));
             return true;
-        }
-        for (std::sregex_iterator it(content.begin(), content.end(), import_re), end; it != end;
-             ++it) {
-            pending.push_back(resolve_url(url, it->str(1)));
         }
     }
 
     remote_hash_ = options_.fallback_hash;
     log::warn("could not resolve the SvelteKit remote hash from /car; using fallback %s",
               remote_hash_.c_str());
+    log::info("startup: remote hash fallback after %zu requests in %zu waves, %lld ms",
+              node_requests + fetched, waves, elapsed_ms(started));
     return true;
 }
 
@@ -875,6 +1004,9 @@ bool PairingSession::load_car_session(CarSession* session, std::string* error) {
     if (!http_get(http_, options_.origin + "/car", &page, error)) {
         return false;
     }
+    // Keep the page for remote-hash discovery if this session turns out to be
+    // unusable; pairing start would otherwise fetch the same page again.
+    cached_car_page_ = page;
 
     std::string car;
     if (!extract_car_object(page, &car, error)) {
@@ -926,6 +1058,7 @@ bool PairingSession::load_car_session(CarSession* session, std::string* error) {
     extract_bool_field(actor_config, "requiresSudoForWrite", &parsed.requires_sudo_for_write);
 
     *session = std::move(parsed);
+    cached_car_page_.clear();
     return true;
 }
 

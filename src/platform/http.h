@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace pk {
@@ -26,10 +27,31 @@ struct HttpResponse {
     std::string body;
 };
 
+struct HttpBatchResponse {
+    HttpResponse response;
+    std::string error;
+};
+
 class HttpClient {
 public:
     virtual ~HttpClient() = default;
     virtual HttpResponse request(const HttpRequest& request, std::string* error) = 0;
+
+    // Fetches independent requests, possibly concurrently, and returns results
+    // in request order. The default implementation is sequential, so a client
+    // that only implements request() keeps working. Backends that share a
+    // connection cache may overlap the transfers.
+    virtual std::vector<HttpBatchResponse> request_many(
+        const std::vector<HttpRequest>& requests) {
+        std::vector<HttpBatchResponse> results;
+        results.reserve(requests.size());
+        for (const HttpRequest& request : requests) {
+            HttpBatchResponse result;
+            result.response = this->request(request, &result.error);
+            results.push_back(std::move(result));
+        }
+        return results;
+    }
 
     // Cookie state stays opaque to callers. The app persists this string in a
     // SecureStore and imports it on the next run; it is never logged.

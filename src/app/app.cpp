@@ -54,6 +54,14 @@ public:
         return inner_->request(request, error);
     }
 
+    // One lock covers the whole batch so a parallel fetch cannot interleave
+    // with session or actor traffic on the same client.
+    std::vector<HttpBatchResponse> request_many(
+        const std::vector<HttpRequest>& requests) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return inner_->request_many(requests);
+    }
+
     std::string export_cookies() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return inner_->export_cookies();

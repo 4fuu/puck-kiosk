@@ -2,12 +2,19 @@
 
 #include <curl/curl.h>
 
+#include <algorithm>
 #include <cctype>
+#include <memory>
 #include <mutex>
 #include <sstream>
+#include <vector>
 
 namespace pk {
 namespace {
+
+// Browsers open about six connections per host; more would only queue at the
+// origin. Batches from PairingSession use the same limit.
+constexpr std::size_t kMaxParallelRequests = 6;
 
 struct TransferState {
     HttpResponse* response = nullptr;
@@ -56,49 +63,29 @@ void global_init() {
     std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
 }
 
-}  // namespace
-
-CurlHttpClient::CurlHttpClient() {
-    global_init();
-    handle_ = curl_easy_init();
-}
-
-CurlHttpClient::~CurlHttpClient() {
-    if (handle_) {
-        curl_easy_cleanup(handle_);
-        handle_ = nullptr;
+void configure_handle(CURL* handle, CURLSH* share, const HttpRequest& request,
+                      TransferState* state, curl_slist** header_list) {
+    curl_easy_reset(handle);
+    // curl_easy_reset keeps the live connections but drops the share, so put it
+    // back before the transfer starts.
+    if (share) {
+        curl_easy_setopt(handle, CURLOPT_SHARE, share);
     }
-}
+    curl_easy_setopt(handle, CURLOPT_COOKIEFILE, "");
 
-HttpResponse CurlHttpClient::request(const HttpRequest& request, std::string* error) {
-    HttpResponse response;
-    if (!handle_) {
-        if (error) {
-            *error = "libcurl is not initialized";
-        }
-        return response;
-    }
+    curl_easy_setopt(handle, CURLOPT_URL, request.url.c_str());
+    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, write_body);
+    curl_easy_setopt(handle, CURLOPT_WRITEDATA, state);
+    curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, write_header);
+    curl_easy_setopt(handle, CURLOPT_HEADERDATA, state);
+    curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(handle, CURLOPT_MAXREDIRS, 8L);
+    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(handle, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
 
-    curl_easy_reset(handle_);
-    curl_easy_setopt(handle_, CURLOPT_COOKIEFILE, "");
-
-    TransferState state;
-    state.response = &response;
-
-    curl_easy_setopt(handle_, CURLOPT_URL, request.url.c_str());
-    curl_easy_setopt(handle_, CURLOPT_WRITEFUNCTION, write_body);
-    curl_easy_setopt(handle_, CURLOPT_WRITEDATA, &state);
-    curl_easy_setopt(handle_, CURLOPT_HEADERFUNCTION, write_header);
-    curl_easy_setopt(handle_, CURLOPT_HEADERDATA, &state);
-    curl_easy_setopt(handle_, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(handle_, CURLOPT_MAXREDIRS, 8L);
-    curl_easy_setopt(handle_, CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_easy_setopt(handle_, CURLOPT_TIMEOUT, 30L);
-    curl_easy_setopt(handle_, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(handle_, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(handle_, CURLOPT_SSL_VERIFYHOST, 2L);
-
-    curl_slist* header_list = nullptr;
     bool has_user_agent = false;
     bool has_expect = false;
     bool has_accept_encoding = false;
@@ -115,36 +102,78 @@ HttpResponse CurlHttpClient::request(const HttpRequest& request, std::string* er
         if (header.name == "Accept-Encoding") {
             has_accept_encoding = true;
         }
-        header_list = curl_slist_append(header_list, (header.name + ": " + header.value).c_str());
+        *header_list =
+            curl_slist_append(*header_list, (header.name + ": " + header.value).c_str());
     }
     // Asset downloads ask for an identity encoding because the Windows curl
     // build does not decode every encoding the CDN can negotiate.
     if (!has_accept_encoding) {
-        curl_easy_setopt(handle_, CURLOPT_ACCEPT_ENCODING, "");
+        curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, "");
     }
     if (!has_user_agent) {
-        header_list = curl_slist_append(header_list, "User-Agent: puck-kiosk/0.1");
+        *header_list = curl_slist_append(*header_list, "User-Agent: puck-kiosk/0.1");
     }
     if (!has_expect) {
-        header_list = curl_slist_append(header_list, "Expect:");
+        *header_list = curl_slist_append(*header_list, "Expect:");
     }
-    if (header_list) {
-        curl_easy_setopt(handle_, CURLOPT_HTTPHEADER, header_list);
+    if (*header_list) {
+        curl_easy_setopt(handle, CURLOPT_HTTPHEADER, *header_list);
     }
 
     if (request.method == "GET" && request.body.empty()) {
-        curl_easy_setopt(handle_, CURLOPT_HTTPGET, 1L);
+        curl_easy_setopt(handle, CURLOPT_HTTPGET, 1L);
     } else if (request.method == "POST") {
-        curl_easy_setopt(handle_, CURLOPT_POST, 1L);
-        curl_easy_setopt(handle_, CURLOPT_POSTFIELDS, request.body.c_str());
-        curl_easy_setopt(handle_, CURLOPT_POSTFIELDSIZE, static_cast<long>(request.body.size()));
+        curl_easy_setopt(handle, CURLOPT_POST, 1L);
+        curl_easy_setopt(handle, CURLOPT_POSTFIELDS, request.body.c_str());
+        curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE, static_cast<long>(request.body.size()));
     } else {
-        curl_easy_setopt(handle_, CURLOPT_CUSTOMREQUEST, request.method.c_str());
+        curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, request.method.c_str());
         if (!request.body.empty()) {
-            curl_easy_setopt(handle_, CURLOPT_POSTFIELDS, request.body.c_str());
-            curl_easy_setopt(handle_, CURLOPT_POSTFIELDSIZE, static_cast<long>(request.body.size()));
+            curl_easy_setopt(handle, CURLOPT_POSTFIELDS, request.body.c_str());
+            curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE,
+                             static_cast<long>(request.body.size()));
         }
     }
+}
+
+}  // namespace
+
+CurlHttpClient::CurlHttpClient() {
+    global_init();
+    handle_ = curl_easy_init();
+    share_ = curl_share_init();
+    if (share_) {
+        curl_share_setopt(share_, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+        curl_share_setopt(share_, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+        curl_share_setopt(share_, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
+        curl_share_setopt(share_, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE);
+    }
+}
+
+CurlHttpClient::~CurlHttpClient() {
+    if (handle_) {
+        curl_easy_cleanup(handle_);
+        handle_ = nullptr;
+    }
+    if (share_) {
+        curl_share_cleanup(share_);
+        share_ = nullptr;
+    }
+}
+
+HttpResponse CurlHttpClient::request(const HttpRequest& request, std::string* error) {
+    HttpResponse response;
+    if (!handle_) {
+        if (error) {
+            *error = "libcurl is not initialized";
+        }
+        return response;
+    }
+
+    TransferState state;
+    state.response = &response;
+    curl_slist* header_list = nullptr;
+    configure_handle(handle_, share_, request, &state, &header_list);
 
     const CURLcode result = curl_easy_perform(handle_);
     long status = 0;
@@ -159,6 +188,118 @@ HttpResponse CurlHttpClient::request(const HttpRequest& request, std::string* er
         *error = std::string("HTTP request failed: ") + curl_easy_strerror(result);
     }
     return response;
+}
+
+std::vector<HttpBatchResponse> CurlHttpClient::request_many(
+    const std::vector<HttpRequest>& requests) {
+    std::vector<HttpBatchResponse> results(requests.size());
+    if (requests.empty()) {
+        return results;
+    }
+    if (!handle_) {
+        for (HttpBatchResponse& result : results) {
+            result.error = "libcurl is not initialized";
+        }
+        return results;
+    }
+    if (requests.size() == 1) {
+        results[0].response = request(requests[0], &results[0].error);
+        return results;
+    }
+
+    CURLM* multi = curl_multi_init();
+    if (!multi) {
+        for (std::size_t i = 0; i < requests.size(); ++i) {
+            results[i].response = request(requests[i], &results[i].error);
+        }
+        return results;
+    }
+
+    struct Pending {
+        CURL* easy = nullptr;
+        TransferState state;
+        curl_slist* headers = nullptr;
+        std::size_t index = 0;
+    };
+    std::vector<std::unique_ptr<Pending>> pending;
+    std::size_t next = 0;
+
+    auto add_next = [&]() {
+        auto item = std::make_unique<Pending>();
+        item->index = next;
+        item->state.response = &results[next].response;
+        item->easy = curl_easy_init();
+        if (!item->easy) {
+            results[next].error = "libcurl could not create a request handle";
+            ++next;
+            return;
+        }
+        configure_handle(item->easy, share_, requests[next], &item->state, &item->headers);
+        if (curl_multi_add_handle(multi, item->easy) != CURLM_OK) {
+            results[next].error = "libcurl could not queue the request";
+            curl_easy_cleanup(item->easy);
+            if (item->headers) {
+                curl_slist_free_all(item->headers);
+            }
+            ++next;
+            return;
+        }
+        ++next;
+        pending.push_back(std::move(item));
+    };
+
+    auto finish = [&](CURL* easy, CURLcode code) {
+        const auto found = std::find_if(
+            pending.begin(), pending.end(),
+            [easy](const std::unique_ptr<Pending>& item) { return item->easy == easy; });
+        if (found == pending.end()) {
+            return;
+        }
+        Pending& item = **found;
+        long status = 0;
+        curl_easy_getinfo(item.easy, CURLINFO_RESPONSE_CODE, &status);
+        results[item.index].response.status = static_cast<int>(status);
+        if (code != CURLE_OK) {
+            results[item.index].error =
+                std::string("HTTP request failed: ") + curl_easy_strerror(code);
+        }
+        curl_multi_remove_handle(multi, item.easy);
+        curl_easy_cleanup(item.easy);
+        if (item.headers) {
+            curl_slist_free_all(item.headers);
+        }
+        pending.erase(found);
+    };
+
+    while (next < requests.size() && pending.size() < kMaxParallelRequests) {
+        add_next();
+    }
+
+    int running = 0;
+    curl_multi_perform(multi, &running);
+    for (;;) {
+        CURLMsg* message = nullptr;
+        int queued = 0;
+        while ((message = curl_multi_info_read(multi, &queued)) != nullptr) {
+            if (message->msg == CURLMSG_DONE) {
+                finish(message->easy_handle, message->data.result);
+            }
+        }
+        if (pending.empty() && next >= requests.size()) {
+            break;
+        }
+        while (next < requests.size() && pending.size() < kMaxParallelRequests) {
+            add_next();
+        }
+        if (pending.empty()) {
+            break;
+        }
+        curl_multi_poll(multi, nullptr, 0, 1000, nullptr);
+        curl_multi_perform(multi, &running);
+    }
+
+    curl_multi_cleanup(multi);
+    return results;
 }
 
 std::string CurlHttpClient::export_cookies() const {

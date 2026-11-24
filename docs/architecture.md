@@ -95,7 +95,11 @@ Each worker owns its HTTP client: the asset fetcher creates a second
 `CurlHttpClient`, so its downloads run concurrently with session validation
 and remote-hash discovery on the shared session client. Before that split,
 both workers serialized on one client and a first-run QR waited for the
-asset downloads.
+asset downloads. The shared client's `request_many()` overlaps independent
+transfers on additional easy handles that share one connection cache, DNS
+cache, TLS session cache, and cookie jar, so sibling SvelteKit chunks are
+fetched in batches instead of one round trip each. The remote hash is still
+resolved before the QR is shown.
 
 The UI thread paints a loading state while those run. When the asset fetch
 finishes, the placeholder `Puck2D` is replaced with `create_puck_view()`, which
@@ -133,7 +137,8 @@ The car does not ask for a password. The existing Amp site owns auth.
 2. Show `https://ampcode.com/auth/pair/car?c=<challenge>` as a QR code.
 3. Poll `/_app/remote/<hash>/claimDevicePairing` every 2 seconds. The
    `<hash>` is discovered from the `/car` page and its SvelteKit node modules;
-   the fallback is `1rbu0j0`. The request body is
+   the node scripts and their sibling chunks are fetched in parallel batches
+   over one connection cache. The fallback is `1rbu0j0`. The request body is
    `{ "payload": base64([{ "device": 1, "verifier": 2 }, "car",
    "<verifier>"]), "refreshes": [] }`.
 4. The signed-in phone opens the QR link, checks the code, and approves.
@@ -144,6 +149,10 @@ The car does not ask for a password. The existing Amp site owns auth.
    `threadActorConfig` (`baseURL`, `ampURL`, `poolName`, `capability`,
    `requiresSudoForWrite`).
 8. Persist the cookie jar and the car session in the `SecureStore`.
+
+When a saved session fails validation, the `/car` page fetched for that check
+is reused for remote-hash discovery, so a fallback pairing does not fetch the
+same page twice.
 
 The session cookie rotates on every `POST /api/car/session`. The client renews
 it every 30 seconds while the car screen is active and persists the exported
@@ -572,7 +581,7 @@ The media overlay releases evicted textures and clears its cache on close.
 | `media-tests` | WebP/PNG/JPEG decode, downscale, cache eviction |
 | `ui-tests` | Hit map, focus, plugin sheets, passkey, diagnostics |
 | `ui-render-tests` | Headless NanoVG output, caption bar, layout |
-| `startup-tests` | Session restore, pairing startup, remote hash discovery |
+| `startup-tests` | Session restore, pairing startup, remote hash discovery, parallel chunk batches, page reuse |
 
 Build and run them after a headless configure:
 

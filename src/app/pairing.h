@@ -88,6 +88,10 @@ private:
     std::string verifier_;
     std::string challenge_;
     std::string pairing_url_;
+    // The /car page fetched while validating a saved session. Reused for
+    // remote-hash discovery when that session turns out to be unusable, so a
+    // first-run pairing does not fetch the same page twice.
+    std::string cached_car_page_;
     QrCode qr_;
     PairingState state_ = PairingState::Idle;
     std::string last_code_;

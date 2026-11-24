@@ -55,6 +55,7 @@ void SessionStartup::run() {
     std::string error;
 
     CarSession saved;
+    const auto restore_started = Clock::now();
     if (pairing_.restore(&saved, &error)) {
         if (!saved.thread_id.empty()) {
             log::info("restored saved session for thread %s", saved.thread_id.c_str());
@@ -64,10 +65,15 @@ void SessionStartup::run() {
     } else {
         log::info("%s", error.c_str());
     }
+    log::info("startup: restore %lld ms", milliseconds_since(restore_started));
 
     if (!force_pair_ && !saved.thread_id.empty()) {
         CarSession session;
-        if (pairing_.load_car_session(&session, &error) && !session.thread_id.empty()) {
+        const auto validation_started = Clock::now();
+        const bool valid =
+            pairing_.load_car_session(&session, &error) && !session.thread_id.empty();
+        log::info("startup: session validation %lld ms", milliseconds_since(validation_started));
+        if (valid) {
             log::info("saved session still valid; skipping pairing");
             {
                 std::lock_guard<std::mutex> lock(mutex_);
