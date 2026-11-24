@@ -45,7 +45,10 @@ function main()
     if is_host("windows") then
         iconpath = path.translate(iconpath, "\\")
     end
-    local content = string.format('IDI_ICON1 ICON "%s"\n', iconpath)
+    -- The comment carries the icon timestamp so a re-rendered icon changes the
+    -- resource script and windres/rc rebuilds the resource.
+    local content = string.format('// icon timestamp: %d\nIDI_ICON1 ICON "%s"\n',
+                                  math.floor(os.mtime(icofile)), iconpath)
     if not os.isfile(rcfile) or io.readfile(rcfile) ~= content then
         io.writefile(rcfile, content)
     end

@@ -21,9 +21,11 @@ import sys
 from pathlib import Path
 
 TILE = 1024
-CORNER_RADIUS = 184  # 18% of the tile side
+CORNER_RADIUS = round(TILE * 0.22)  # conventional app-icon corner radius
 BACKGROUND = "#0b0d0b"  # app stage background
 SPRITE_CROP = "440x520+30+10"  # Puck's body; the legs are cropped by the tile
+SPRITE_SCALE = 1.12  # relative to the sprite filling the tile
+SPRITE_CENTER = (0.58, 0.61)  # sprite centre, as a fraction of the tile side
 ICON_SIZES = "256,128,64,48,32,16"
 
 
@@ -72,11 +74,7 @@ def main() -> int:
             magick,
             "-size",
             f"{TILE}x{TILE}",
-            "xc:none",
-            "-fill",
-            BACKGROUND,
-            "-draw",
-            f"roundrectangle 0,0 {TILE - 1},{TILE - 1} {CORNER_RADIUS},{CORNER_RADIUS}",
+            f"xc:{BACKGROUND}",
             "(",
             str(sprite),
             "-crop",
@@ -86,13 +84,33 @@ def main() -> int:
             "-flop",
             "-resize",
             f"{TILE}x{TILE}^",
-            "-gravity",
-            "center",
-            "-extent",
-            f"{TILE}x{TILE}",
+            "-resize",
+            f"{round(SPRITE_SCALE * 100)}%",
             ")",
             "-gravity",
             "center",
+            "-geometry",
+            "%+d%+d"
+            % (
+                round((SPRITE_CENTER[0] - 0.5) * TILE),
+                round((SPRITE_CENTER[1] - 0.5) * TILE),
+            ),
+            "-composite",
+            # Clip the sprite to the rounded tile: without this the arms and
+            # body escape the background at the edges and corners.
+            "(",
+            "-size",
+            f"{TILE}x{TILE}",
+            "xc:black",
+            "-fill",
+            "white",
+            "-draw",
+            f"roundrectangle 0,0 {TILE - 1},{TILE - 1} {CORNER_RADIUS},{CORNER_RADIUS}",
+            ")",
+            "-alpha",
+            "off",
+            "-compose",
+            "CopyOpacity",
             "-composite",
             "-define",
             f"icon:auto-resize={ICON_SIZES}",
