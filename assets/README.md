@@ -5,61 +5,71 @@ PolySans / Berkeley Mono fonts. Those are copyrighted assets.
 
 ## Runtime assets
 
-The native client fetches the public Puck assets from
-`https://static.ampcode.com/content/puck/` and caches them under:
+The client reads `assets/manifest.json` from its working directory, downloads
+missing files from `https://static.ampcode.com/content/puck/`, verifies each
+file's size and SHA-256, and caches it under:
 
 ```text
-$XDG_CACHE_HOME/puck-kiosk/assets/
+assets/cache/
 ```
 
+The cache key is the content hash in the URL (`puck-<hash>.json`,
+`albedo-<hash>.webp`, `normal-<hash>.webp`, `image-<hash>.webp`,
+`arms-<hash>.bin`, `base-<hash>.bin`, `classic-<hash>.png`). Treat the cache as
+disposable. A failed fetch leaves the existing cache in place, and the renderer
+falls back to the 2D placeholder.
+
 For development, `tools/fetch-assets` downloads the classic fixture into
-`assets/cache/` (gitignored) and verifies every file against
-`assets/manifest.json`:
+`assets/cache/` and verifies every file against `assets/manifest.json`:
 
 ```bash
 tools/fetch-assets
 ```
 
-The repository stores only the manifest (URL, size, SHA-256), never the binaries.
+The repository stores only the manifest (URL, size, SHA-256), never the
+binaries.
 
-The cache key is the content hash in the URL (`puck-<hash>.json`,
-`albedo-<hash>.webp`, `normal-<hash>.webp`, `image-<hash>.webp`,
-`arms-<hash>.bin`, `props-<hash>.bin`). Treat the cache as disposable.
+The NSIS installer ships the executable, license, and icon only. It does not
+install `assets/manifest.json` or the cache, so an installed copy uses the
+placeholder Puck until those files are supplied in its working directory.
 
-## Local 2D sprite
+## 2D sprite
 
-For development and for the 2D-only build, place a sprite at:
+The 2D renderer prefers:
 
 ```text
-assets/classic.png
+assets/cache/avatars/classic-<hash>.png
 ```
 
-The production 2D renderer uses the 498×602 image and the face data
-(`eyes`, `mouth`, `body`, `limbs`) from the matching `puck-<hash>.json`. A
-placeholder is drawn when no sprite is present.
+and falls back to the opaque WebP sprite
+`assets/cache/3d/classic/image-<hash>.webp`. The matching
+`assets/cache/3d/classic/puck-<hash>.json` supplies `eyes`, `mouth`, `body`,
+`limbs`, `skinColor`, and `scleraColor`. A procedural placeholder is drawn
+when neither sprite is present.
 
 ## Fonts
 
 Do not commit the PolySans or Berkeley Mono files. Pass a font you have the
-right to use with `--font /path/to/font.ttf`. The M0 build falls back to the
-system DejaVu Sans for development.
+right to use with `--font /path/to/font.ttf`. Without it, the client uses a
+system font: DejaVu Sans, Liberation Sans, or Noto Sans on Linux, and Segoe UI
+or Arial on Windows.
 
-## Where should the downloaded resources live?
+## Where downloaded resources live
 
 - **Product repository:** only `assets/manifest.json`, `tools/fetch-assets`, and
-the docs. No downloaded binaries, no scraped web bundle, no commercial fonts.
+  the documentation. No downloaded binaries, no scraped web bundle, no
+  commercial fonts.
 - **Development cache:** `assets/cache/` (gitignored) for local runs. Delete it
-at any time; the fetch script recreates it.
-- **Private asset mirror:** use a separate private repository or object store
-only if you need a reproducible offline fixture set. Put it behind Git LFS or
-S3/MinIO, and mirror only `classic` plus the variants you actually test. The full
-148-variant set is not worth committing.
+  at any time; the fetch script recreates it.
+- **Private asset mirror:** a separate private repository or object store for a
+  reproducible offline fixture set. Put it behind Git LFS or S3/MinIO, and
+  mirror only the variants you test.
 - **Scraped site bundle:** keep the JS/CSS/HTML reference outside the product
-repository, for example in an internal research bucket or a `research/` folder
-in the private mirror. It is Amp's code and changes with every deploy; it is not
-a stable build input.
+  repository, for example in an internal research bucket or a `research/`
+  folder in the private mirror. It is Amp's code and changes with every deploy;
+  it is not a stable build input.
 - **Fonts:** never commit PolySans or Berkeley Mono. Pass a licensed font with
-`--font`.
+  `--font`.
 
 A private repository does not change the licensing terms of the assets. Use it
 for internal development and interoperability testing, not redistribution.

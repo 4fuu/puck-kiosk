@@ -1,41 +1,69 @@
 # puck-kiosk
 
-A native, low-overhead Linux client for Amp Puck car mode. It targets embedded
-devices with OpenGL ES 3.0 and as little as 512 MB of RAM; desktop builds use
-the same core with a different window/input backend.
+A native C++17 client for Amp Puck car mode, built for kiosks and embedded
+Linux devices with a Windows desktop build. It implements the `ampcode.com/car`
+flow directly: QR pairing, Puck voice calls, media presentations, plugin option
+sheets, passkey guidance, and diagnostics. It renders with OpenGL ES 3.0 on
+Linux or desktop OpenGL 3.3 on Windows and runs without a browser engine. A 2D
+Puck fallback keeps the app usable when the 3D assets or shaders are
+unavailable.
 
-> **Status: M0 foundation.** The xmake build, headless EGL/GLES renderer, platform
-> seams, and a placeholder pairing screen work. Pairing, network, voice, and the
-> real Puck 2D/3D renderers are not implemented yet.
+The web client is a SvelteKit page; this client speaks the same HTTP,
+WebSocket, and WebRTC protocols and keeps the same interaction model.
 
-## Why this exists
+## Status
 
-`ampcode.com/car` is a SvelteKit car client: a pairing screen, a Puck voice call,
-large driving-safe controls, plugin option sheets, and full-stage image
-presentations. Running a browser engine on a 512 MB embedded board is wasteful
-and often impossible. This project keeps the same interaction model but renders
-it with a small C++/GLES pipeline.
+The car flow, voice, 2D/3D Puck, media presentations, plugin sheets, passkey
+guidance, and diagnostics are implemented. These are the display and input
+backends:
 
-The 3D Puck is optional by design. The 2D renderer is always available, and the
-3D renderer falls back to it when the GLES context, assets, or shaders fail,
-matching the web client's behavior when WebGL2 is unavailable.
+| Backend | What it does |
+| --- | --- |
+| `headless` | EGL surfaceless rendering with llvmpipe. Used for CI, tests, and frame snapshots. |
+| `drm` | Direct DRM/KMS scanout through GBM and EGL, with libinput or evdev input. Compiled and error-path tested; not run on real hardware. |
+| `win32` | Windows 10/11 x64 desktop window with WGL OpenGL 3.3, WASAPI audio, XInput gamepad input, a self-drawn caption bar, and a per-user NSIS installer. |
+| `wayland`, `x11` | Accepted by the `--backend` option but not implemented. `create_platform()` reports an error for them. |
 
 ## Requirements
 
-- Linux (embedded or desktop), C++17 compiler, [xmake](https://xmake.io)
-- EGL and OpenGL ES 3.0 development headers
-- A display stack on the target: DRM/KMS (implemented, needs hardware
-  verification), Wayland (planned), or X11 (planned). The default build uses a
-  headless EGL surfaceless surface.
-- Windows 10/11 x64 for the `win32` backend: a Win32 window, WGL, and desktop
-  OpenGL 3.3 core. Build with mingw-w64 on Linux or MSVC/clang-cl on Windows.
-- 512 MB RAM target; the renderer and assets are sized for that budget.
-- No Chromium, WebKit, Electron, or Flutter runtime.
+### Linux
 
-On Debian/Ubuntu, the development packages are installed by `.agents/setup`.
-The short list is `build-essential pkg-config libegl-dev libgles-dev`.
+- A C++17 compiler, `pkg-config`, and [xmake](https://xmake.io).
+- EGL and OpenGL ES 3.0 development headers.
+- ALSA, Opus, and `webrtc-audio-processing` for voice.
+- libcurl, OpenSSL, libpng, libjpeg, libwebp, and libqrencode.
+- Python 3 and `curl` for `tools/fetch-assets`.
+- For `--backend=drm`: libdrm, GBM, and libudev. libinput is optional; the
+  evdev fallback covers builds without it.
+- 512 MB RAM is the target budget. No Chromium, WebKit, Electron, or Flutter
+  runtime is used.
 
-## Quick start
+On Debian/Ubuntu:
+
+```bash
+sudo apt install build-essential pkg-config libegl-dev libgles-dev \
+  libasound2-dev libopus-dev libwebrtc-audio-processing-dev \
+  libpng-dev libwebp-dev libjpeg-dev libcurl4-openssl-dev libssl-dev \
+  libqrencode-dev
+```
+
+Add `libdrm-dev libgbm-dev libudev-dev libinput-dev` for the DRM backend. The
+repository's `.agents/setup` installs the full development set, including the
+Windows cross-build tools.
+
+### Windows
+
+- Windows 10/11 x64.
+- Visual Studio 2022 Build Tools with the "Desktop development with C++"
+  workload, or mingw-w64 for a cross build from Linux.
+- xmake.
+- Python 3 and ImageMagick (`magick` or `convert`) for the generated app icon.
+- NSIS (`makensis`) for the installer.
+- `curl` for `tools/fetch-assets`.
+
+## Build and run
+
+### Linux headless
 
 ```bash
 xmake f -y -m release --backend=headless
@@ -43,301 +71,234 @@ xmake build -y
 xmake run puck-kiosk --headless --frames 1 --out build/pairing.ppm
 ```
 
-A successful run prints the EGL/GL version and:
+A successful run logs the EGL/GL version and writes the frame:
 
 ```text
-[puck-kiosk] info  Puck renderer: puck-2d
+[puck-kiosk] info  headless EGL 1.5, GL OpenGL ES 3.2 Mesa ..., renderer llvmpipe ...
 [puck-kiosk] info  wrote build/pairing.ppm (1280x720)
 ```
 
-To look at the frame, convert the PPM with ImageMagick (optional):
+Convert the PPM if needed (ImageMagick 7 uses `magick` instead of `convert`):
 
 ```bash
 convert build/pairing.ppm build/pairing.png
 ```
 
-Portrait and other sizes are arguments:
-
-```bash
-xmake run puck-kiosk --headless --width 720 --height 1280 \
-  --frames 1 --out build/pairing-portrait.ppm
-```
-
-`--no-3d` forces the 2D renderer. The default 3D option currently reports that
-the GLES renderer is planned for M1 and falls back to 2D.
-
-## Windows (win32 backend)
-
-The Windows backend is the desktop fallback for running the kiosk client on a
-company PC. It uses a Win32 window with WGL and desktop OpenGL 3.3 core, the
-vendored NanoVG GL3 canvas, Win32 pointer/touch/keyboard input, and WASAPI
-audio. The Linux headless, DRM, and test builds are unchanged; Windows sources
-are compiled only for `--backend=win32`.
-
-### Cross-compile with mingw-w64 (verified in this repository's orb)
-
-```bash
-sudo apt install mingw-w64
-xmake f -y -p mingw -a x64 -m release --backend=win32
-xmake build -y
-```
-
-The result is `build/mingw/x64/release/puck-kiosk.exe`, a Windows x64
-executable with no mingw runtime DLL dependencies. Use `-p mingw` rather than
-`-p windows`: xmake's Windows dependency ports branch on the target platform,
-and `-p mingw` builds OpenSSL, libdatachannel, and the other packages with the
-mingw toolchain instead of MSVC.
-
-The first configure downloads and builds libcurl (Schannel), OpenSSL 3,
-libdatachannel, IXWebSocket, Opus, libpng, libjpeg, libwebp, and libqrencode.
-That takes several minutes and needs network access. `third_party/xmake-repo/`
-contains the two local package overrides the mingw build needs; see its README.
-
-### Run
-
-```bash
-wine build/mingw/x64/release/puck-kiosk.exe
-```
-
-With no flags the executable behaves like a desktop app: it opens the window
-immediately, restores the saved car session from the secure store, and connects
-the actor. When no session is saved, or the saved one is no longer valid, it
-shows the pairing QR. Startup work (session validation, remote-hash discovery,
-the pairing challenge, and the asset fetch) runs off the UI thread, so the
-window paints a live loading state instead of blocking on the network. `--pair`
-forces a fresh pairing even when a saved session exists.
-
-The window runs until it is closed and writes no PPM. `--platform headless`
-creates a hidden WGL window and writes the PPM, which is the Windows equivalent
-of the Linux headless smoke test. Use `--frames 1 --out <path>` for a single
-diagnostic snapshot:
-
-```bash
-wine build/mingw/x64/release/puck-kiosk.exe --platform win32 \
-  --frames 1 --out build/win32-pairing.ppm
-```
-
-`--fullscreen` creates a borderless popup whose client area is exactly
-`--width` x `--height`, centered in the primary monitor's work area. At the
-monitor's native size it also covers the taskbar. Windowed mode remains the
-default.
-
-Windowed and fullscreen rendering is supersampled. The app draws into an
-offscreen framebuffer at `client size * render scale` (auto: 2x, multiplied by
-`dpi/96` on a high-DPI panel) and downsamples it to the window with a linear
-blit, so the 2D canvas and the 3D Puck get the same edge smoothing. Pass
-`--render-scale <1..3>` to change it; `--render-scale 1` renders 1:1 and
-reproduces the pre-supersample output. The target is capped at 24M pixels
-(about 192 MB with depth-stencil) so a 4K or high-DPI surface stays inside the
-memory budget. The hidden `--platform headless` PPM path always renders 1:1 so
-PPM comparisons stay valid.
-
-The UI font comes from `%WINDIR%\Fonts` (Segoe UI, then Arial) unless `--font`
-is given. On a high-DPI display the process is per-monitor DPI aware, but the
-layout is pixel-based; pass `--width` and `--height` that match the panel.
-
-### Native Windows (MSVC or clang-cl)
-
-Install Visual Studio 2022 Build Tools with "Desktop development with C++" and
-xmake. From a Developer Command Prompt:
-
-```bat
-xmake f -y -p windows -a x64 -m release --backend=win32 --toolchain=msvc
-xmake build -y
-xmake run puck-kiosk --platform win32 --frames 1 --out build\win32-pairing.ppm
-```
-
-xmake builds the same pinned dependency versions with MSVC. The OpenSSL 3 port
-needs a Windows Perl (Strawberry Perl or an MSYS2 Perl), which the xmake
-package manager installs automatically. `clang-cl` works the same way with
-`--toolchain=clang-cl`. The native MSVC path is documented from the same
-sources but was not exercised in this orb; the mingw path is the verified one.
-
-If your organization standardizes on vcpkg, install the matching static ports
-(`curl[schannel]`, `openssl`, `libdatachannel[media]`, `ixwebsocket[openssl]`,
-`opus`, `libpng`, `libjpeg-turbo`, `libwebp`, `libqrencode`), switch the win32
-`add_requires` block in `xmake.lua` to system packages, and pass
-`--pkg_searchdirs=<vcpkg>/installed/x64-windows-static`. The mingw and MSVC
-paths above use xmake's own packages and are the supported ones; the vcpkg
-variant has not been exercised in this orb.
-
-### Desktop install
-
-`xmake pack -f nsis` builds the win32 target and produces a per-user Windows
-installer at `build/xpack/puck-kiosk/puck-kiosk-0.1.0.exe`:
-
-```bash
-sudo apt install nsis   # Debian/Ubuntu host; NSIS on Windows
-tools/fetch-assets      # 2D sprite for the app icon (optional, see below)
-xmake f -y -p mingw -a x64 -m release --backend=win32
-xmake pack -f nsis
-```
-
-The installer needs no administrator rights and never prompts for UAC:
-
-- installs `puck-kiosk.exe` into `%LOCALAPPDATA%\Programs\puck-kiosk`. The
-  directory page lets the user pick another folder they can write to.
-- adds `Start Menu > Puck Kiosk > Puck Kiosk`, plus a desktop shortcut when the
-  optional component is left selected (it is on by default).
-- registers an uninstaller in Settings > Apps and in the Start Menu folder.
-- installs the executable, `LICENSE.txt`, and the icon. Puck models, textures,
-  and fonts are not installed; the client fetches or is supplied them at
-  runtime, as described under [Assets and licensing](#assets-and-licensing).
-
-Both shortcuts start `puck-kiosk.exe` with no arguments and with the install
-directory as the working directory, so a normal launch restores the saved
-session or starts pairing. The flags from `--help` remain available for
-diagnostics, for example
-`puck-kiosk.exe --platform win32 --frames 1 --out frame.ppm`. Uninstalling
-removes the shortcuts, the executable, the icon, and the registry entries; it
-leaves the user's session and cache data in place.
-
-The app and installer icon is rendered by `tools/make-icon` from the fetched 2D
-Puck sprite (mirrored to face left, on a rounded `#0b0d0b` tile) into the
-gitignored `.cache/win32/puck-kiosk.ico`, then compiled into the executable with
-`windres`/`rc` and used by the installer and shortcuts. Because it derives from
-Amp's art, the icon is not committed: run `tools/fetch-assets` before the build
-to get it. Without the sprite the build still succeeds, logs a note, and
-produces an executable and installer without an icon.
-
-Packaging is configured by the `xpack("puck-kiosk")` block in `xmake.lua` and
-the checked-in template `tools/installer/puck-kiosk.nsi`; `tools/installer/package.lua`
-resolves the `${PACKAGE_*}` variables and runs `makensis`. The template is
-per-user by construction (`RequestExecutionLevel user`, `$LOCALAPPDATA` default,
-HKCU registry) because xmake's built-in NSIS template installs into
-`Program Files` and elevates unless it is started with `/NOADMIN`. xmake's
-built-in NSIS plugin also only runs on a Windows host, so invoking `makensis`
-directly keeps `xmake pack -f nsis` working from the Linux cross build and from
-Windows with the same template. `makensis` must be installed and on `PATH` (the
-standard `C:\Program Files (x86)\NSIS` location is also detected), and
-`tools/make-icon` needs ImageMagick.
-
-### Known limitations
-
-- WASAPI capture/render is implemented against the `AudioIO` seam, but no real
-  Windows audio device was available in the orb. Under wine the default
-  endpoints are missing, so the client logs the failure and falls back to the
-  file/null backend. Test both directions on the target PC.
-- Echo cancellation is compiled out on Windows: `webrtc-audio-processing` has
-  no mingw/Windows xmake package. The startup log says
-  `AEC: built without webrtc-audio-processing on Windows`. Opus and
-  libdatachannel are still linked, so a call works without AEC.
-- The 3D Puck is built for `--backend=win32` through the desktop GL 3.3
-  loader. It renders at the supersample resolution and falls back to `Puck2D`
-  when assets or shaders are unavailable.
-- DPI awareness is per-monitor v2. The layout is pixel-based; `dpi_scale()`
-  reports the supersample factor (render scale times `dpi/96`), so the canvas
-  and Puck3D render at that density and the window blits back to the client
-  size. The UI is still physically smaller on a high-DPI panel unless
-  `--width`/`--height` are raised, and there is no automatic re-layout when
-  the window moves to another monitor.
-- Input is windowed: `WM_POINTER` for touch and pen, `WM_TOUCH` as the fallback
-  on systems without the pointer API, `WM_MOUSE*` for the mouse, and
-  `WM_KEYDOWN`/`WM_CHAR`. There is no IME or text-entry field yet, and no
-  gamepad support (XInput will be wired later).
-- The window is a normal resizable window by default. `--fullscreen` uses a
-  borderless popup with an exact client size; Escape still quits and F12 still
-  toggles Debug. There is no kiosk lock.
-- Windowed mode caps a 1920x1080 client at 1920x1061 on a 1920x1080 monitor
-  because of the frame and maximum tracking size. Use `--fullscreen` for an
-  exact 1920x1080 client.
-- `libqrencode` is LGPL-2.1. The mingw build links it statically into the
-  executable, which is fine for local evaluation but needs a DLL (or a
-  permissively licensed encoder) before redistribution.
-- The actor WebSocket, pairing, and voice paths compile, but only pairing was
-  exercised against the live site in the orb; a real Puck call needs a paired
-  phone and the target PC's microphone/speakers.
-
-### First run on the company PC
-
-1. Start `puck-kiosk.exe --platform win32 --frames 0`. The log should show
-   `win32: WGL window, GL 3.3 ...` and `audio backend: wasapi`.
-2. Confirm the pairing QR scans with a phone and the phone approval completes.
-3. Click a control and press Escape; the window should close.
-4. If the log says `wasapi: no default playback device` or `audio backend:
-   file`, check the default devices and the Windows microphone privacy setting.
-5. If the UI is too small on a high-DPI panel, pass `--width`/`--height` for
-   the panel's physical resolution.
-
-## Architecture
-
-The app is split into replaceable seams rather than one platform-specific blob:
-
-```text
-src/
-  app/          CarUi, state, and the frame loop
-  platform/     Display, InputSource, AudioIO, HttpClient, WebSocket, SecureStore
-  render/       Canvas interface and the NanoVG GLES3/GL3 backends
-  puck/         PuckView interface, Puck2D, Puck3D (M1)
-  core/         types and logging
-third_party/
-  nanovg/       vendored MIT 2D vector renderer
-```
-
-- `Display` owns the surface/EGL context; `InputSource` owns touch/key events.
-- `AudioIO` moves PCM only; WebRTC/Opus live above it.
-- `Canvas` is the 2D drawing seam. NanoVG is the M0 backend (GLES3 on Linux,
-  GL3 on Windows); Skia, LVGL, or a software backend can replace it.
-- `PuckView` is the 2D/3D seam. Both renderers take the same `PuckVisual` state.
-- `create_platform()` is the only place that knows which OS backends exist.
-
-See [docs/architecture.md](docs/architecture.md) for the module contracts,
-Puck asset details, the media-presentation flow, and the porting checklist.
-
-## Platform status
-
-| Backend | Status | Notes |
-| --- | --- | --- |
-| headless | Works | EGL surfaceless + llvmpipe; used for CI and orb screenshots |
-| DRM/KMS | Implemented, unverified on hardware | Direct scanout + libinput/evdev input; build with `--backend=drm` |
-| win32 | Implemented, smoke-tested under wine | Win32 + WGL OpenGL 3.3 core, NanoVG GL3, 2x supersampling, pointer/touch/mouse, WASAPI; 2D or 3D Puck |
-| Wayland | Planned | Desktop and compositor-based embedded images |
-| X11 | Planned | Desktop fallback |
-
-The M0 binary is deliberately headless-first so the renderer and layout can be
-developed without a display server. The target backend only replaces
-`Display`/`InputSource`/`AudioIO`; the app and Puck code do not change. The
-Windows backend is the desktop evaluation path; it does not change the
-embedded Linux build.
-
-## Assets and licensing
-
-This repository does **not** ship Amp's Puck models, textures, or the PolySans /
-Berkeley Mono fonts. They are copyrighted assets. `assets/manifest.json` stores
-only URLs, sizes, and hashes; `tools/fetch-assets` downloads the development
-fixture into the gitignored `assets/cache/`.
+With `assets/manifest.json` present, the client verifies the cache and
+downloads missing Puck assets into `assets/cache/` in the current working
+directory. If the fetch cannot complete, it draws the 2D placeholder. To fetch
+the development fixture before the first run:
 
 ```bash
 tools/fetch-assets
 ```
 
-At runtime the client fetches the public 3D assets on demand and caches them;
-the 2D renderer uses a local sprite supplied by the operator. For a reproducible
-offline mirror, use a separate private asset repository or object store. See
-[assets/README.md](assets/README.md).
+Other sizes and the 2D-only renderer:
 
-### Private asset mirror (optional)
+```bash
+xmake run puck-kiosk --headless --width 720 --height 1280 \
+  --frames 1 --out build/pairing-portrait.ppm
+xmake run puck-kiosk --headless --frames 1 --no-3d --out build/pairing-2d.ppm
+```
 
-The classic fixture is also mirrored in the **private** repository
-[4fuu/puck-kiosk-assets-private](https://github.com/4fuu/puck-kiosk-assets-private).
-Access requires an explicit invite. The public build does **not** depend on it:
-`tools/fetch-assets` keeps using the public source URLs, and collaborators
-without access can ignore this section and use the public fetch path above.
+The DRM backend runs on a free DRM device. The actor observation window
+defaults to 60 seconds; pass `--actor-seconds 0` to keep the kiosk running
+until Escape, `SIGINT`, or `SIGTERM`:
 
-The code is MIT licensed. Third-party notices are in `third_party/nanovg/`.
+```bash
+xmake f -y -m release --backend=drm
+xmake build -y
+xmake run puck-kiosk --platform drm --actor-seconds 0
+```
 
-## Roadmap
+Set `PUCK_KIOSK_DRM_DEVICE=/dev/dri/card1` on a multi-GPU board. See
+[docs/architecture.md](docs/architecture.md) for the hardware checklist.
 
-- **M0 (current):** build, headless EGL/GLES, Canvas/NanoVG, Puck2D placeholder,
-  pairing-screen layout, platform seams.
-- **M1:** real 2D avatar + face curves, PUCK v2 parser, GLES 3.0 Puck renderer,
-  2D fallback on context/asset/shader failure.
-- **M2:** QR pairing + `claimDevicePairing` poll, session cookie, `/car` data,
-  actor WebSocket JSON-RPC.
-- **M3:** WebRTC voice (libdatachannel + Opus + webrtc-audio-processing), mute/end,
-  captions, `puck_media_presentation` image overlay.
-- **M4:** plugin option sheets, passkey-on-phone flow, diagnostics, DRM/KMS
-  kiosk packaging, Buildroot/Yocto recipes.
+### Windows desktop
+
+Build with MSVC from a Developer Command Prompt:
+
+```bat
+xmake f -y -p windows -a x64 -m release --backend=win32 --toolchain=msvc
+xmake build -y
+xmake run puck-kiosk --platform win32
+```
+
+With no arguments the window opens, restores a saved car session, or shows the
+pairing QR when there is no valid session. `--pair` forces a fresh pairing.
+`--fullscreen` uses a borderless window with an exact `--width` x `--height`
+client area; `--render-scale <1..3>` controls supersampling.
+
+Build the per-user installer after the executable:
+
+```bat
+python tools\fetch-assets
+xmake pack -f nsis
+```
+
+`tools/fetch-assets` is a Python script, so run it with `python` on Windows.
+It is optional for the build but supplies the 2D sprite used for the app and
+installer icon. It needs Python 3 and `curl`; the icon step needs ImageMagick.
+`xmake pack` needs `makensis` on `PATH` or in the standard NSIS install
+directory. The installer is written under `build\xpack\puck-kiosk\`. It
+installs for the current user without administrator rights into
+`%LOCALAPPDATA%\Programs\puck-kiosk`, adds Start Menu and optional desktop
+shortcuts, and registers an uninstaller in HKCU.
+
+The mingw cross build from Linux uses the same sources:
+
+```bash
+sudo apt install mingw-w64 nsis imagemagick python3 curl
+tools/fetch-assets
+xmake f -y -p mingw -a x64 -m release --backend=win32
+xmake build -y
+xmake pack -f nsis
+```
+
+Use `-p mingw`, not `-p windows`: xmake's Windows dependency ports select their
+mingw install path from the target platform. The result is under
+`build/mingw/x64/release/`. The hidden Windows smoke test writes a PPM:
+
+```bash
+wine build/mingw/x64/release/puck-kiosk.exe --platform headless \
+  --frames 1 --out build/win32-pairing.ppm
+```
+
+On a headless Linux host, prefix the wine command with `xvfb-run -a`.
+
+The mingw cross build is the verified Windows build path in this repository.
+The native MSVC path builds the same pinned dependencies but has not been
+exercised here.
+
+## Features
+
+- **Pairing and session restore.** A 32-byte verifier becomes a SHA-256
+  base64url challenge for the phone QR. The client polls the SvelteKit remote
+  endpoint, creates the car session, persists the rotating cookie jar, and
+  restores a saved session on the next launch. Startup network work runs off
+  the UI thread while the window paints a live loading state.
+- **Car screen and voice.** The car screen shows Puck, the call control, live
+  captions, and the mute/end controls. Voice uses libdatachannel and Opus with
+  a receive jitter buffer and NACK retransmission. AEC, noise suppression, and
+  a high-pass filter run on Linux through `webrtc-audio-processing`; Windows
+  builds compile AEC out.
+- **Puck.** `Puck2D` draws the 498x602 sprite with the face overlay and
+  placeholder fallback. `Puck3D` parses the PUCK v2 meshes and rig, runs the
+  part, eye, spotlight, and composite shaders on GLES 3.0 or desktop GL 3.3,
+  and falls back to 2D if initialization fails. Pointer input drives gaze,
+  body drag, turn drag, and throw springs.
+- **Media and plugins.** The `puck_media_presentation` overlay fetches images
+  with the session cookie, decodes them off the UI thread, downscales to
+  1280 px, and keeps three decoded textures. Plugin `select`, `confirm`, and
+  phone sheets answer `plugin.ui.respond`. The passkey flow shows phone
+  guidance or re-authorizes the actor connection.
+- **Input and desktop integration.** Touch, pen, mouse, keyboard, and gamepad
+  input share one event model. Gamepad focus navigation includes a hint bar,
+  and End is hold-to-confirm. The Windows window draws its own 36 px caption
+  bar in windowed mode, with minimize, maximize, and close; Win11 gets DWM
+  rounded corners. Windowed and fullscreen rendering is supersampled at up to
+  24M pixels and runs at 60 fps on desktop.
+- **Diagnostics.** The hidden Debug panel shows environment, audio, and session
+  state, runs a microphone test, selects the AEC mode, and posts the web
+  client's diagnostics body. Entering car mode posts the usage entry. Reveal
+  the panel with F12, a 2-second hold or five taps in the bottom-left corner,
+  or Back+Start on a gamepad.
+
+## Project layout
+
+```text
+src/
+  app/          App state, car UI, pairing, calls, media, plugins, diagnostics
+  core/         Types, logging, SHA-256
+  platform/     Display, input, audio, HTTP, WebSocket, secure store
+  puck/         PuckView, Puck2D, Puck3D, PUCK v2 parsing, pointer physics
+  render/       Canvas interface and the NanoVG GLES3/GL3 backend
+  voice/        WebRTC peer, Opus, RTP, jitter buffer, AEC
+tests/          Unit and headless render tests
+tools/          Asset fetcher, icon generator, NSIS installer template
+assets/         Manifest only; fetched binaries are gitignored
+docs/           Architecture and protocol notes
+third_party/    NanoVG, Material Symbols, nlohmann/json, GL headers
+```
+
+`create_platform()` in `src/platform/platform.cpp` is the only place that
+selects OS backends. The app, renderer, and Puck code include no OS headers.
+See [docs/architecture.md](docs/architecture.md) for the module contracts,
+pairing and actor protocols, backend details, and the porting checklist.
+
+## Tests
+
+| Target | Covers |
+| --- | --- |
+| `puck-tests` | PUCK v2 parsing, rig parsing, posing, malformed input |
+| `puck-interaction-tests` | Gaze, grab, drag, throw, spring-back, reset |
+| `voice-tests` | RTP, jitter buffer, NACK, Opus round-trip |
+| `media-tests` | WebP/PNG/JPEG decode, downscale, texture cache eviction |
+| `ui-tests` | Hit map, focus, plugin sheets, passkey, diagnostics |
+| `ui-render-tests` | Headless NanoVG output, caption bar, layout |
+| `startup-tests` | Session restore, pairing startup, remote hash discovery |
+
+Build and run all of them from a headless configure:
+
+```bash
+xmake f -y -m release --backend=headless
+for t in puck-tests voice-tests media-tests ui-tests ui-render-tests \
+         puck-interaction-tests startup-tests; do
+  xmake build -y "$t" && xmake run "$t" || exit 1
+done
+```
+
+`ui-render-tests` needs the headless EGL/llvmpipe stack. The AEC smoke check
+runs on the file/null audio backend:
+
+```bash
+xmake run puck-kiosk --voice-aec-smoke
+```
+
+## Assets and licensing
+
+This repository does not ship Amp's Puck models, textures, or the PolySans and
+Berkeley Mono fonts. They are copyrighted assets. `assets/manifest.json` stores
+only URLs, sizes, and SHA-256 hashes; `tools/fetch-assets` downloads the
+development fixture into the gitignored `assets/cache/`.
+
+At runtime, when `assets/manifest.json` is present in the working directory,
+the client fetches missing assets from the public CDN, verifies each file
+against the manifest, and caches it under `assets/cache/`. A failed fetch
+leaves the existing cache in place and the renderer falls back to the
+placeholder. Pass a font you have the right to use with
+`--font /path/to/font.ttf`; otherwise the client uses a system font.
+
+For a reproducible offline mirror, use a separate private repository or object
+store. See [assets/README.md](assets/README.md). The optional private mirror
+`4fuu/puck-kiosk-assets-private` is access-controlled; the public build and
+`tools/fetch-assets` do not depend on it.
+
+The code is MIT licensed. Third-party code under `third_party/` carries its own
+license: NanoVG (MIT), Material Symbols (Apache-2.0), the Khronos GL headers
+(MIT), and nlohmann/json (MIT).
+
+## Limitations
+
+- The DRM/KMS backend compiles and reports its error paths, but scanout has not
+  been run on real hardware.
+- Windows builds have no echo cancellation because
+  `webrtc-audio-processing` is not available for that target.
+- A live voice call on the company PC is still unverified. The AEC smoke test
+  runs with the file/null backend; the two-peer loopback needs an ICE-capable
+  network interface.
+- The layout is pixel-based. On a high-DPI panel, pass `--width` and `--height`
+  that match the panel; moving the window to another monitor does not re-layout
+  the UI.
+- The installer is unsigned, so Windows SmartScreen warns on first run.
+- The mingw build links libqrencode (LGPL-2.1) statically. A permissively
+  licensed encoder is required before redistribution.
+- The NSIS installer ships the executable, license, and icon only. It does not
+  install `assets/manifest.json` or the asset cache, so an installed copy uses
+  the placeholder Puck until those files are supplied in its working directory.
+- There is no IME or text-entry field, no platform authenticator (the passkey
+  button re-authorizes the actor connection), and no kiosk lock: Escape closes
+  the window.
 
 ## License
 
