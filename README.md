@@ -61,6 +61,13 @@ Windows cross-build tools.
 - NSIS (`makensis`) for the installer.
 - `curl` for `tools/fetch-assets`.
 
+The Windows build links the vendored SpeexDSP AEC, so no extra
+audio-processing package is required there. A real desktop `--audio auto` or
+explicit `--audio wasapi` keeps a retryable WASAPI backend when no default
+endpoint exists; it does not substitute the synthetic file/tone backend.
+`--headless --audio auto`, `--audio file`, and `--audio null` retain that test
+backend.
+
 ## Build and run
 
 ### Linux headless
@@ -126,6 +133,9 @@ xmake run puck-kiosk --platform win32
 
 With no arguments the window opens, restores a saved car session, or shows the
 pairing QR when there is no valid session. `--pair` forces a fresh pairing.
+`--temporary-session` is the explicit shared-vehicle policy: never restore a
+previous account, never persist the car session, and delete it and return to
+the QR after hangup or exit. Personal desktop launches keep the restore default.
 `--fullscreen` uses a borderless window with an exact `--width` x `--height`
 client area; `--render-scale <1..3>` controls supersampling.
 
@@ -178,13 +188,29 @@ exercised here.
 - **Pairing and session restore.** A 32-byte verifier becomes a SHA-256
   base64url challenge for the phone QR. The client polls the SvelteKit remote
   endpoint, creates the car session, persists the rotating cookie jar, and
-  restores a saved session on the next launch. Startup network work runs off
-  the UI thread while the window paints a live loading state.
+  restores a saved session on the next launch. Startup, polling, session
+  renewal, token refresh, and actor socket replacement run off the UI thread.
+  A failed round clears its QR and offers Try Again; `--temporary-session` is
+  the explicit shared-vehicle mode that deletes the session, clears the
+  in-memory cookie jar, and returns to the QR after hangup or exit.
+- **Signaling recovery.** A signaling-only socket loss keeps the WebRTC media
+  and the current call. Once the replacement socket receives its resume
+  acknowledgement, the client reattaches with the original `sessionID`, tracks
+  the receipt, and replays non-audio events missed during that call (at most
+  500, each at most 16 KB). A media failure is a separate terminal state. A
+  call is released only after the bounded close handshake, and an unconfirmed
+  close forces a fresh socket plus an old-stop retry before redial.
 - **Car screen and voice.** The car screen shows Puck, the call control, live
   captions, and the mute/end controls. Voice uses libdatachannel and Opus with
-  a receive jitter buffer and NACK retransmission. AEC, noise suppression, and
-  a high-pass filter run on Linux through `webrtc-audio-processing`; Windows
-  builds compile AEC out.
+  a receive jitter buffer and NACK retransmission. AEC and noise suppression
+  run through `webrtc-audio-processing` on Linux; the same capture/render seam
+  uses the vendored SpeexDSP backend on Windows and as a runtime fallback.
+  AGC is off by default: SpeexDSP's AGC lowered normal speech and cut echo
+  return loss enhancement sharply in the file tests; APM's AGC raised quiet
+  speech but still reduced cancellation.
+  `On` and `Remote Only` both enable AEC because the kiosk's only playback is
+  the remote voice; `Off` is a true bypass. The Debug panel reports whether the
+  selected mode is actually available in the running build.
 - **Puck.** `Puck2D` draws the 498x602 sprite with the face overlay and
   placeholder fallback. `Puck3D` parses the PUCK v2 meshes and rig, runs the
   part, eye, spotlight, and composite shaders on GLES 3.0 or desktop GL 3.3,
@@ -202,8 +228,9 @@ exercised here.
   rounded corners. Windowed and fullscreen rendering is supersampled at up to
   24M pixels and runs at 60 fps on desktop.
 - **Diagnostics.** The hidden Debug panel shows environment, audio, and session
-  state, runs a microphone test, selects the AEC mode, and posts the web
-  client's diagnostics body. Entering car mode posts the usage entry. Reveal
+  state, separates the next call's AEC configuration from the current call's
+  reported status, runs a raw microphone test, selects the AEC mode, and posts
+  the web client's diagnostics body. Entering car mode posts the usage entry. Reveal
   the panel with F12, a 2-second hold or five taps in the bottom-left corner,
   or Back+Start on a gamepad.
 
@@ -236,17 +263,18 @@ pairing and actor protocols, backend details, and the porting checklist.
 | `puck-tests` | PUCK v2 parsing, rig parsing, posing, malformed input |
 | `puck-interaction-tests` | Gaze, grab, drag, throw, spring-back, reset |
 | `voice-tests` | RTP, jitter buffer, NACK, Opus round-trip |
+| `call-flow-tests` | Offer/answer order, ready cue, dictation gate, close confirmations, redial |
 | `media-tests` | WebP/PNG/JPEG decode, downscale, texture cache eviction |
-| `ui-tests` | Hit map, focus, plugin sheets, passkey, diagnostics |
-| `ui-render-tests` | Headless NanoVG output, caption bar, layout |
-| `startup-tests` | Session restore, pairing startup, remote hash discovery |
+| `ui-tests` | Hit map, focus, pairing recovery, call availability, plugin sheets, passkey, diagnostics |
+| `ui-render-tests` | Headless NanoVG output, caption bar, layout, empty pairing card |
+| `startup-tests` | Session restore, async pairing, retry ordering, authorization, temporary-session cleanup |
 
 Build and run all of them from a headless configure:
 
 ```bash
 xmake f -y -m release --backend=headless
-for t in puck-tests voice-tests media-tests ui-tests ui-render-tests \
-         puck-interaction-tests startup-tests; do
+for t in puck-tests voice-tests call-flow-tests media-tests ui-tests \
+         ui-render-tests puck-interaction-tests startup-tests voice-aec-tests; do
   xmake build -y "$t" && xmake run "$t" || exit 1
 done
 ```
@@ -256,7 +284,17 @@ runs on the file/null audio backend:
 
 ```bash
 xmake run puck-kiosk --voice-aec-smoke
+xmake run voice-aec-tests
 ```
+
+`voice-aec-tests` replays Puck-only, user-only, double-talk, and noise
+scenarios through every compiled AEC backend. It uses two short LibriSpeech
+clips under `tests/fixtures/`, reports ERLE, near-end gain/correlation, and
+double-talk echo suppression, and fails when the shipped `aec+ns` path misses
+its bounds. It is a file test, not a speaker/microphone measurement. Pass
+`--far` and `--near` with 16 kHz or 48 kHz mono WAV recordings to replay the
+same checks on an operator recording; `--wav-dir` keeps the inputs and each
+backend's outputs for listening.
 
 ## Assets and licensing
 
@@ -279,26 +317,42 @@ store. See [assets/README.md](assets/README.md). The optional private mirror
 
 The code is MIT licensed. Third-party code under `third_party/` carries its own
 license: NanoVG (MIT), Material Symbols (Apache-2.0), the Khronos GL headers
-(MIT), and nlohmann/json (MIT).
+(MIT), nlohmann/json (MIT), and the SpeexDSP subset (BSD-3-Clause). The two
+speech clips under `tests/fixtures/` are derived from LibriSpeech
+(CC BY 4.0); see `tests/fixtures/README.md`.
 
 ## Limitations
 
 - The DRM/KMS backend compiles and reports its error paths, but scanout has not
   been run on real hardware.
-- Windows builds have no echo cancellation because
-  `webrtc-audio-processing` is not available for that target.
+- Windows uses the vendored SpeexDSP AEC because
+  `webrtc-audio-processing` is not available for that target. Its file-test
+  results are in `voice-aec-tests`; real speaker, microphone, and car cabin
+  crosstalk are still unverified.
 - A live voice call on the company PC is still unverified. The AEC smoke test
   runs with the file/null backend; the two-peer loopback needs an ICE-capable
   network interface.
+- Signaling recovery is verified against the local actor/WebRTC fixture, not a
+  production actor. A dropped media connection remains a terminal call error:
+  there is no automatic WebRTC rebuild after a transient `Disconnected` and no
+  actor-audio relay fallback. Those behaviors, the production DataChannel name
+  (`puck-webrtc-voice` versus the web's `oai-events`), and `session.closed`
+  round-tripping over the online channel are unverified.
+- The Windows no-endpoint path was verified under Wine: the preflight reports
+  the HRESULT and the backend stays retryable. A real endpoint appearing after
+  launch is not tested on Windows hardware. Real speaker/microphone double
+  talk, endpoint-provided effects, and the car cabin acoustics are also
+  unverified; the AEC numbers are file fixtures, not a hardware claim.
 - The layout is pixel-based. On a high-DPI panel, pass `--width` and `--height`
   that match the panel; moving the window to another monitor does not re-layout
   the UI.
 - The installer is unsigned, so Windows SmartScreen warns on first run.
 - The mingw build links libqrencode (LGPL-2.1) statically. A permissively
   licensed encoder is required before redistribution.
-- The NSIS installer ships the executable, license, icon, and
-  `assets/manifest.json`, plus whatever art `tools/fetch-assets` has cached
-  at pack time, so a bundled install needs no first-run download. Without
+- The NSIS installer ships the executable, `LICENSE.txt`, the SpeexDSP
+  `LICENSE-SpeexDSP.txt`, the icon, and `assets/manifest.json`, plus whatever
+  art `tools/fetch-assets` has cached at pack time, so a bundled install needs
+  no first-run download. Without
   bundled art the client fetches it on first run into `assets/cache`. Uninstall
   deletes that cache; the session in `%LOCALAPPDATA%\puck-kiosk` stays.
 - There is no IME or text-entry field, no platform authenticator (the passkey

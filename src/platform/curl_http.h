@@ -27,6 +27,7 @@ public:
         const std::vector<HttpRequest>& requests) override;
     std::string export_cookies() const override;
     void import_cookies(const std::string& cookies) override;
+    void clear_cookies() override;
 
     bool valid() const { return handle_ != nullptr; }
 

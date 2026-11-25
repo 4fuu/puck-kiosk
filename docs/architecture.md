@@ -165,6 +165,15 @@ ends that call.
 `PUCK_KIOSK_ORIGIN` environment variable overrides the origin only for a
 loopback URL; it exists for local protocol testing and is ignored otherwise.
 
+`--temporary-session` is the explicit shared-vehicle mode. It forces a fresh
+pairing, keeps the car session and cookie in memory only, and on hangup, a
+normal exit, a 401 renewal, or three idle minutes sends
+`DELETE /api/car/session`, erases the saved session, clears the in-memory cookie jar
+(`CURLOPT_COOKIELIST` `"ALL"`; importing an empty string is a no-op), and
+returns to the QR. A failed DELETE still clears local state. Personal desktop
+launches keep the saved-session restore default; temporary mode is not enabled
+globally.
+
 ## Actor transport
 
 After the car session is established:
@@ -194,14 +203,33 @@ After the car session is established:
   path accepts both text and binary frames because the RivetKit bare encoding
   can deliver binary.
 - The client sends a text `ping` every 30 seconds and ignores `pong`.
+- Observer readiness is not a guessed `observer_snapshot` wire event. It is
+  true only after the current socket has received server traffic, normally the
+  `client_resume` reply. A JSON-RPC void success has no `result` and still
+  counts. The call button and the extra `--call` request wait for this state.
+- A signaling-only loss keeps the WebRTC media and the current call. Token
+  refresh and socket replacement run in a background worker; after the new
+  socket is ready the client sends `client_puck_voice_start` with
+  `transport: { type: "webrtc_attach", sessionID: <original> }`, waits for the
+  attach receipt, and replays non-audio data-channel events missed during the
+  same call. The replay caps at 500 events and 16 KB per event; audio deltas
+  are never replayed. A media (`PeerState`) failure is handled separately and
+  is not turned into a signaling retry.
+- A call end sends `session.close` on the data channel, sends
+  `client_puck_voice_stop` with empty `params`, and waits up to five seconds
+  for `session.closed`, the stop receipt, and any pending start. The peer is
+  released only after the state machine reports `ended()`/`failed()`. If that
+  close is unconfirmed, the next call first replaces the actor socket and
+  retries the old empty-params stop; it never redials on the old connection.
 
 Actor requests and notifications used by the client:
 
 | Direction | Method or event | Purpose |
 | --- | --- | --- |
 | out | `client_resume` | Resume the observer and request the full snapshot |
-| out | `client_puck_voice_start` | Start a call with an SDP offer |
-| out | `client_puck_voice_stop` | End a call |
+| out | `client_puck_voice_start` | Start a call with an SDP offer, or reattach with `webrtc_attach` |
+| out | `client_puck_voice_stop` | End a call (empty params; also the stale-stop retry) |
+| out | `client_puck_voice_replay` | Replay non-audio events missed while signaling was down |
 | out | `client_puck_voice_user_state` | Publish the mute state |
 | out | `client_reauthorize` | Re-authorize the actor connection for a passkey prompt |
 | out | `executor_plugin_message` | Answer a `plugin.ui.respond` request |
@@ -223,10 +251,26 @@ Actor requests and notifications used by the client:
 - RTP/RTCP handling above libdatachannel: Opus packetization, NACK generation
   and retransmission, and a receive jitter buffer with adaptive delay and
   packet-loss concealment.
-- AEC, noise suppression, and a high-pass filter through
-  `webrtc-audio-processing` on Linux. The render path receives every played
-  frame as the AEC reference. Windows builds compile AEC out because the
-  package is not available for that target.
+- AEC and noise suppression through `webrtc-audio-processing` on Linux. The
+  render path receives every played frame as the AEC reference. Windows has no
+  `webrtc-audio-processing` package, so `EchoCanceller` selects the vendored
+  SpeexDSP backend instead; the same backend is a runtime fallback on Linux
+  if the WebRTC module fails to initialize. Both process 10 ms blocks; the
+  portable backend uses a 200 ms echo tail while APM estimates its own delay.
+  AGC is off by default: it raised the near-end level but
+  reduced echo suppression in the double-talk fixture.
+
+The AEC contract at this seam is deliberately small. `VoiceEngine` already
+calls `process_render()` for every decoded playback frame, including silence
+and concealment, and `process_capture()` before level metering, mute, and
+Opus. The two-argument `EchoCanceller::initialize()` therefore runs the
+default AEC path with no new `AudioIO` method. `AecSettings` is available for
+the owner of `voice/engine.*` if a machine needs a different `tail_ms`, a
+known bulk `reference_delay_ms`, or AGC enabled; the current call path keeps
+the defaults (200 ms, delay 0, AGC off). If local UI or media playback is ever
+added, feed it to `process_render()` for `On` but not for `Remote Only`, and
+keep the remote voice frame as the reference. `Diagnostics::echo_mode()` is
+the effective engine value; `requested_echo_mode()` is the radio/web value.
 
 `CallController` owns the protocol and UI state; `VoiceEngine` moves audio.
 The call state machine covers offer, answer (15 s timeout), connect (15 s
@@ -236,8 +280,8 @@ and then `client_puck_voice_stop`. A `session.closed` data-channel message or a
 remote `ended`/`closed` state ends the call. `--mute-after`, `--end-after`, and
 the loopback modes are test hooks for these paths.
 
-The stack is libdatachannel + Opus + webrtc-audio-processing rather than
-GStreamer webrtcbin. A two-peer Opus loopback benchmark measured peak RSS of
+The stack is libdatachannel + Opus, with `webrtc-audio-processing` on Linux
+and the vendored SpeexDSP subset on Windows, rather than GStreamer webrtcbin. A two-peer Opus loopback benchmark measured peak RSS of
 14.8-15.1 MB versus 31.4-32.0 MB for webrtcbin, 16.8-17.3 MB versus
 36.9-37.3 MB with AEC, and a 13-library runtime closure versus 62. libdatachannel
 has no receive jitter buffer, so the client implements one.
@@ -317,8 +361,12 @@ mute/end controls stay outside the overlay.
 
 - Incoming `plugin_message` notifications carry `plugin.ui.snapshot`,
   `plugin.ui.request_added`, `plugin.ui.request_settled`, or
-  `plugin.ui.request_removed` events. The `observer_snapshot` event's
-  `plugins.uiRequests` is also accepted as a snapshot source.
+  `plugin.ui.request_removed` events. A resume/observer result containing
+  `plugins.uiRequests` is accepted as the authoritative snapshot too.
+- Replacing the actor socket clears locally tracked requests until that new
+  snapshot arrives. Locally answered select/confirm requests and hidden
+  sheets stay suppressed, so an older pending snapshot cannot pop a question
+  the user already answered.
 - `ui.select` becomes option buttons; `ui.confirm` without fields becomes
   Yes/No; `ui.input` and `ui.confirm` with fields become a phone sheet.
 - Answers go out as
@@ -344,6 +392,29 @@ the operator choose `on`, `remote-only`, or `off` echo cancellation for the
 next call, runs a 0.75-second microphone test, and posts the web client's body
 to `/api/car/diagnostics`. Entering car mode posts `/api/car/usage` with
 `entry: "direct"` and the coarse-pointer and viewport fields.
+
+The echo mode has two layers. `requested_echo_mode()` is what the operator
+selected and what the radio and web payload show. `echo_mode()` is what the
+engine gets: `On` and `Remote Only` both become `On` because the kiosk has no
+local playback source, and a build with no AEC backend becomes `Off`. The
+Debug rows call these **next call** values; they never claim that a mode is
+already running. `On` and `Remote Only` both name the same available render
+reference (the remote voice) in this kiosk; only the policy differs if local
+playback is added later.
+
+The **current call** value comes from `Diagnostics::set_call_aec_status(
+in_call, VoiceEngine::aec_status())`; the app updates it from the running
+engine each frame and clears it at session teardown. `active` requires an
+initialized canceller with at least one processing stage, so `Off`, an
+unavailable backend, or a failed initialization is never reported as running.
+`DebugView.aec_current_*` exposes the same fields to the UI.
+
+The payload keeps the web-compatible requested `echoCancellation` string and
+adds `echoCancellationSupported`, an `echoCancellationNextCall` object
+(`effective`, `backend`, `detail`, NS/AGC), and either an
+`echoCancellationCurrent` object (`inCall`, `active`, `backend`, `detail`,
+NS/AGC) or `null`. The microphone test is explicitly reported as raw capture:
+it has no played reference, so it cannot claim AEC.
 
 The Debug entry is hidden in normal use. It appears after any of:
 
@@ -474,13 +545,29 @@ starts on systems without the newer DLL.
 `WasapiAudioIO` opens the default capture and render endpoints in shared mode
 with `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM` (48 kHz mono 16-bit PCM). Event
 threads move samples through bounded ring buffers; `read_capture` returns zero
-when no packet is ready, matching ALSA. If either endpoint is missing or COM
-activation fails, the platform factory logs the HRESULT and falls back to the
-file/null backend.
+when no packet is ready, matching ALSA. `open_client()` fetches the default
+endpoint on every `start_capture()` / `start_playback()` call, so a device
+that appears after launch is picked up by the next call attempt.
 
-AEC is compiled out on Windows. `create_platform()` logs
-`AEC: built without webrtc-audio-processing on Windows; echo cancellation is
-disabled`. Opus and libdatachannel stay linked, so calls work without AEC.
+`create_wasapi_audio()` creates the retryable backend even when no endpoint
+exists. `probe_wasapi_endpoints()` is a separate preflight that reports the
+actual capture and playback errors (for example `0x80070490`, element not
+found); `create_platform()` logs that result but does not replace the backend
+with a synthetic one. A real desktop `--audio auto` or explicit
+`--audio wasapi` therefore keeps a WASAPI backend with no endpoints and fails
+a call attempt honestly; the next attempt re-queries. `--headless --audio
+auto`, `--audio file`, and `--audio null` keep the file/synthetic backend for
+tests. Linux follows the same policy: headless auto or explicit file/null can
+use the file backend, while desktop auto or explicit ALSA never falls back to
+a tone.
+
+Windows uses the vendored SpeexDSP backend selected by `EchoCanceller`; no
+platform interface change is needed because the engine already passes every
+decoded playback frame to `process_render` and every captured frame through
+`process_capture`. The split SpeexDSP playback/capture API keeps a two-frame
+reference history and tolerates the capture thread starting first. The
+default WASAPI endpoints may apply their own communications effects; app-side
+AEC still runs, but endpoint processing has not been measured on hardware.
 
 ### Caption bar and window controls
 
@@ -524,8 +611,10 @@ Packaging lives outside the app:
   removes the shortcuts, the executable, the icon, the manifest, the
   re-downloadable `assets/cache`, and the registry entries, and keeps the
   session in `%LOCALAPPDATA%\puck-kiosk`.
-- The installer ships the executable, `LICENSE.txt`, the icon,
-  `assets/manifest.json`, and any art cached at pack time; without bundled
+- The installer ships the executable, `LICENSE.txt`, the SpeexDSP
+  `LICENSE-SpeexDSP.txt` (required by its BSD-3-Clause binary distribution
+  terms), the icon, `assets/manifest.json`, and any art cached at pack time;
+  without bundled
   art the client fetches it on first run into `assets/cache` under the
   install directory, and the session is written to
   `%LOCALAPPDATA%\puck-kiosk`. Cached files are verified locally by size and
@@ -600,7 +689,31 @@ a CLI check:
 
 ```bash
 xmake run puck-kiosk --voice-aec-smoke
+xmake run voice-aec-tests
 ```
+
+`voice-aec-tests` runs the same `EchoCanceller` API as the call path over a
+recorded fixture in `tests/fixtures/` (or `--far`/`--near` operator WAVs):
+Puck-only for ERLE, user-only for gain/correlation, gated double talk for
+near-inactive echo suppression and near-active preservation, and noise-only
+frames for noise suppression. It compares `off`, `aec`, `aec+ns`,
+`aec+ns+agc`, and `ns` on each compiled backend, reports the numbers, and
+fails when the shipped `aec+ns` configuration misses its bounds. It is a file
+test; it does not replace a speaker, microphone, or car-cabin measurement.
+
+One run on the committed 12 s fixture measured:
+
+| backend | echo-only ERLE | user gain / corr | double-talk echo | double-talk near | noise floor |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| WebRTC APM (`aec+ns`) | 42.6 dB | -0.6 dB / 0.89 | 30.3 dB | -1.7 dB / 0.81 | -11.9 dB |
+| SpeexDSP (`aec+ns`) | 32.2 dB | -0.5 dB / 0.86 | 28.7 dB | -0.7 dB / 0.86 | -23.0 dB |
+
+`Off` measured 0 dB ERLE, 0 dB near gain, correlation 1.00 and 0 dB
+double-talk suppression, so it is a true bypass. Enabling AGC raised quiet
+speech by 10.4 dB on APM but dropped ERLE from 42.6 to 35.5 dB. SpeexDSP's AGC
+lowered normal speech by 10.0 dB, raised quiet speech by only 2.0 dB, and cut
+ERLE from 32.2 to 14.7 dB; the default keeps AGC off. These are file results,
+not a claim about a particular speaker or microphone.
 
 `--voice-loopback` runs two local WebRTC peers and needs a network interface
 that libjuice can gather ICE candidates from.

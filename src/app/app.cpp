@@ -23,6 +23,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <deque>
@@ -41,6 +42,10 @@ namespace pk {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+// run_session() returns this after a shared-device cleanup so App::run can
+// create a fresh session and show the QR without tearing down the window.
+constexpr int kRestartPairing = 3;
 
 // Pairing renews the car session on the UI thread while the media worker
 // fetches pictures. The HttpClient seam is documented as sequential, so this
@@ -70,6 +75,11 @@ public:
     void import_cookies(const std::string& cookies) override {
         std::lock_guard<std::mutex> lock(mutex_);
         inner_->import_cookies(cookies);
+    }
+
+    void clear_cookies() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        inner_->clear_cookies();
     }
 
 private:
@@ -136,6 +146,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             stopping_ = false;
             closed_ = false;
+            communicated_ = false;
             error_.clear();
             messages_.clear();
         }
@@ -176,6 +187,14 @@ public:
         return closed_ && messages_.empty();
     }
 
+    // Web observer readiness is "this socket has received server traffic",
+    // not a guessed snapshot event. The first frame on a new socket is the
+    // resume acknowledgement (which may be a JSON-RPC void response).
+    bool server_communicated() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return communicated_;
+    }
+
 private:
     void run() {
         for (;;) {
@@ -189,6 +208,7 @@ private:
             std::string error;
             if (socket_->poll(message, &error)) {
                 std::lock_guard<std::mutex> lock(mutex_);
+                communicated_ = true;
                 messages_.push_back(std::move(message));
                 continue;
             }
@@ -211,6 +231,255 @@ private:
     std::string error_;
     bool stopping_ = false;
     bool closed_ = false;
+    bool communicated_ = false;
+};
+
+// One per call. The voice worker's data callback owns a shared_ptr to this
+// mailbox, not a reference to the app's unique_ptr<CallController>, so a
+// hangup can reset the controller while an in-flight callback is still
+// returning. The main loop consumes the queues.
+struct CallInbox {
+    static constexpr std::size_t kMaxReplayEvents = 500;
+    static constexpr std::size_t kMaxReplayBytes = 16000;
+
+    void on_data(const std::string& text) {
+        std::lock_guard<std::mutex> lock(mutex);
+        data.push_back(text);
+        if (!buffer_replay) {
+            return;
+        }
+        const nlohmann::json event = nlohmann::json::parse(text, nullptr, false);
+        if (!event.is_object() || !event.contains("type") ||
+            !event["type"].is_string()) {
+            return;
+        }
+        const std::string type = event["type"].get<std::string>();
+        // Web bufferEvent(): audio deltas stay on the media path and are never
+        // replayed into the actor; oversized events are dropped.
+        if (type.rfind("session.output_audio.", 0) == 0 ||
+            type.rfind("session.input_audio.", 0) == 0 ||
+            text.size() > kMaxReplayBytes) {
+            return;
+        }
+        if (replay.size() >= kMaxReplayEvents) {
+            replay.pop_front();
+        }
+        replay.push_back(event);
+    }
+
+    void begin_replay() {
+        std::lock_guard<std::mutex> lock(mutex);
+        buffer_replay = true;
+        replay.clear();
+    }
+
+    std::deque<nlohmann::json> take_replay() {
+        std::lock_guard<std::mutex> lock(mutex);
+        buffer_replay = false;
+        std::deque<nlohmann::json> taken;
+        taken.swap(replay);
+        return taken;
+    }
+
+    std::deque<std::string> take_data() {
+        std::lock_guard<std::mutex> lock(mutex);
+        std::deque<std::string> taken;
+        taken.swap(data);
+        return taken;
+    }
+
+    std::mutex mutex;
+    std::deque<std::string> data;
+    std::deque<nlohmann::json> replay;
+    bool buffer_replay = false;
+};
+
+struct ActorPrepareResult {
+    bool ok = false;
+    CarSession session;
+    std::unique_ptr<WebSocket> socket;
+    std::string error;
+};
+
+// Token refresh and the WebSocket handshake can each take seconds. They run
+// here, off the UI thread; the main loop swaps in the finished socket. Every
+// start gets a copy of the session so the worker never reads fields the UI is
+// mutating.
+class AsyncActorPrepare {
+public:
+    using Worker =
+        std::function<bool(CarSession*, std::unique_ptr<WebSocket>*, std::string*)>;
+
+    ~AsyncActorPrepare() { stop(); }
+
+    // A finished result is still "busy" until the UI takes it; otherwise a
+    // second start would join the worker and overwrite the socket it produced.
+    bool busy() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return running_ || done_;
+    }
+
+    bool start(Worker worker, const CarSession& session) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (running_ || done_) {
+                return false;
+            }
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (running_ || done_) {
+                return false;
+            }
+            running_ = true;
+            done_ = false;
+            result_ = ActorPrepareResult{};
+        }
+        const CarSession snapshot = session;
+        thread_ = std::thread([this, worker = std::move(worker), snapshot]() mutable {
+            ActorPrepareResult result;
+            result.session = snapshot;
+            std::unique_ptr<WebSocket> socket;
+            std::string error;
+            result.ok = worker(&result.session, &socket, &error);
+            result.socket = std::move(socket);
+            result.error = std::move(error);
+            std::lock_guard<std::mutex> lock(mutex_);
+            result_ = std::move(result);
+            running_ = false;
+            done_ = true;
+        });
+        return true;
+    }
+
+    bool take(ActorPrepareResult* out) {
+        std::thread finished;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!done_) {
+                return false;
+            }
+            *out = std::move(result_);
+            result_ = ActorPrepareResult{};
+            done_ = false;
+            if (thread_.joinable() && !running_) {
+                finished = std::move(thread_);
+            }
+        }
+        if (finished.joinable()) {
+            finished.join();
+        }
+        return true;
+    }
+
+    void stop() {
+        std::thread thread;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (thread_.joinable()) {
+                thread = std::move(thread_);
+            }
+        }
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::thread thread_;
+    ActorPrepareResult result_;
+    bool running_ = false;
+    bool done_ = false;
+};
+
+// The rotating car-session cookie is renewed while the car screen is live.
+// The HTTP call is slow-network bounded by curl's timeout, so it runs here
+// rather than stalling tick/input/render.
+class AsyncSessionRenew {
+public:
+    using Worker = std::function<bool(std::string*)>;
+
+    ~AsyncSessionRenew() { stop(); }
+
+    bool busy() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return running_ || done_;
+    }
+
+    bool start(Worker worker) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (running_ || done_) {
+                return false;
+            }
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (running_ || done_) {
+                return false;
+            }
+            running_ = true;
+            error_.clear();
+        }
+        thread_ = std::thread([this, worker = std::move(worker)]() {
+            std::string error;
+            const bool ok = worker(&error);
+            std::lock_guard<std::mutex> lock(mutex_);
+            ok_ = ok;
+            error_ = std::move(error);
+            running_ = false;
+            done_ = true;
+        });
+        return true;
+    }
+
+    bool take(bool* ok, std::string* error) {
+        std::thread finished;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!done_) {
+                return false;
+            }
+            *ok = ok_;
+            *error = error_;
+            done_ = false;
+            if (thread_.joinable() && !running_) {
+                finished = std::move(thread_);
+            }
+        }
+        if (finished.joinable()) {
+            finished.join();
+        }
+        return true;
+    }
+
+    void stop() {
+        std::thread thread;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (thread_.joinable()) {
+                thread = std::move(thread_);
+            }
+        }
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::thread thread_;
+    bool running_ = false;
+    bool done_ = false;
+    bool ok_ = false;
+    std::string error_;
 };
 
 bool load_text_spec(const std::string& spec, std::string* text, std::string* error) {
@@ -797,7 +1066,7 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
     };
 
     SessionStartup startup(*platform.http, platform.secure_store.get(), pairing_options,
-                           options.pair);
+                           options.pair || options.temporary_session);
     startup.start();
     assets.start();
 
@@ -835,7 +1104,9 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
 
     bool dirty = true;
     bool quit = false;
+    bool retry_requested = false;
     UiActionHandlers debug_handlers;
+    debug_handlers.pairing_retry = [&]() { retry_requested = true; };
     debug_handlers.debug_open = [&]() { diagnostics.open(); };
     debug_handlers.debug_close = [&]() { diagnostics.close(); };
     debug_handlers.echo_mode = [&](int index) {
@@ -1007,19 +1278,32 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
     }
     std::string error;
 
-    auto show_challenge = [&]() {
-        ui.set_pairing(pairing.qr(), "Call Puck", "Waiting for scan");
+    auto show_challenge = [&](const std::string& status, bool announce) {
+        ui.set_pairing(pairing.qr(), "Call Puck",
+                       status.empty() ? std::string("Waiting for scan") : status);
+        ui.set_pairing_recovery(PairingRecovery::None);
         sync_pairing();
         render(true);
         if (options.dump_targets) {
             dump_targets(ui.hit_map());
         }
-        std::cout << pairing.pairing_url() << std::endl;
-        log::info("pairing: QR ready");
+        if (announce) {
+            std::cout << pairing.pairing_url() << std::endl;
+            log::info("pairing: QR ready");
+        }
+    };
+
+    auto restart_pairing = [&]() -> bool {
+        std::string restart_error;
+        if (!pairing.restart(&restart_error)) {
+            log::warn("pairing retry: %s", restart_error.c_str());
+            return false;
+        }
+        return true;
     };
 
     if (!resumed) {
-        show_challenge();
+        show_challenge("Waiting for scan", true);
     } else {
         ui.set_pairing(pairing.qr(), "Connecting", "Restoring session");
         sync_pairing();
@@ -1075,114 +1359,292 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
         use_script_time = false;
     }
 
-    int generation = pairing.challenge_generation();
-    std::string shown_code;
-
-    const auto deadline = Clock::now() + std::chrono::seconds(options.pair_timeout_seconds);
-    PairingStatus status;
-    if (resumed) {
-        status.state = PairingState::Paired;
-    }
-    PairingState last_state = PairingState::Idle;
-    auto next_poll = Clock::now();
-    auto last_render = Clock::now();
-    while (!resumed && !quit && !platform.display->should_close() && Clock::now() < deadline) {
-        poll_debug_input();
-        if (upgrade_puck()) {
-            dirty = true;
+    auto wait_for_retry = [&](const std::string& title, const std::string& message,
+                              int failed_generation) -> bool {
+        // The failed round's QR and confirmation code are no longer valid.
+        // Keep the status text and offer a fresh round instead.
+        ui.set_pairing(QrCode{}, title, message);
+        ui.set_pairing_recovery(PairingRecovery::Retry);
+        sync_pairing();
+        render(true);
+        if (options.dump_targets) {
+            dump_targets(ui.hit_map());
         }
-
-        // The asset fetch shares the serialized HTTP seam; let it finish
-        // before polling so a large download cannot stall the pairing screen.
-        if (Clock::now() >= next_poll && assets.finished()) {
-            next_poll = Clock::now() + std::chrono::seconds(pairing.poll_interval_seconds());
-            status = pairing.poll(&error);
-            if (!error.empty()) {
-                log::warn("pairing poll failed: %s", error.c_str());
-                error.clear();
+        auto last_render = Clock::now();
+        while (!quit && !platform.display->should_close()) {
+            poll_debug_input();
+            if (upgrade_puck()) {
+                dirty = true;
             }
-            if (status.state != last_state) {
-                last_state = status.state;
-                log::info("pairing state: %s", status.message.c_str());
+            if (pairing.challenge_generation() != failed_generation) {
+                // Leave the restart's update for the main pairing loop; it
+                // may already contain the new scanned code.
+                show_challenge("Waiting for scan", true);
+                return true;
             }
-            if (pairing.challenge_generation() != generation) {
-                generation = pairing.challenge_generation();
-                shown_code.clear();
-                log::info("pairing challenge changed; scan the new QR");
-                show_challenge();
-                dirty = false;
-            }
-            if (status.state == PairingState::Scanned && !status.code.empty() &&
-                status.code != shown_code) {
-                shown_code = status.code;
-                ui.set_pairing(pairing.qr(), "Confirm on Your Device", "Confirm on your device",
-                               status.code);
+            if (retry_requested) {
+                retry_requested = false;
+                // Re-check the round at click time: the UI may have rendered
+                // an older state than the worker's latest terminal reply.
+                ui.set_pairing_recovery(PairingRecovery::Retrying);
                 sync_pairing();
                 render(true);
+                if (!restart_pairing()) {
+                    ui.set_pairing_recovery(PairingRecovery::Retry);
+                    sync_pairing();
+                    render(true);
+                }
+                dirty = true;
+            }
+            if (puck_interaction.active()) {
+                dirty = true;
+            }
+            const bool headless = std::string(platform.display->backend_name()) == "headless";
+            const bool desktop = std::string(platform.display->backend_name()) == "win32";
+            if (dirty || (diagnostics.is_open() && !headless &&
+                          Clock::now() - last_render >= std::chrono::milliseconds(100)) ||
+                (desktop && Clock::now() - last_render >= std::chrono::milliseconds(16))) {
+                sync_pairing();
+                render(true);
+                last_render = Clock::now();
                 dirty = false;
-                log::info("pairing scanned; code %s", status.code.c_str());
             }
-            if (status.state == PairingState::Paired) {
-                break;
-            }
-            if (status.state == PairingState::Failed || status.state == PairingState::Expired) {
-                log::error("pairing failed: %s", status.message.c_str());
-                return 1;
-            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
         }
+        return false;
+    };
 
-        if (puck_interaction.active()) {
-            dirty = true;
-        }
-        // Headless has no input and writes a PPM per frame, so only re-render
-        // while the debug panel is open there.
-        const bool headless = std::string(platform.display->backend_name()) == "headless";
-        const bool desktop = std::string(platform.display->backend_name()) == "win32";
-        if (dirty || (diagnostics.is_open() && !headless &&
-                      Clock::now() - last_render >= std::chrono::milliseconds(100)) ||
-            (desktop && Clock::now() - last_render >= std::chrono::milliseconds(16))) {
+    auto run_pairing_and_setup = [&]() -> bool {
+        for (;;) {
+            int generation = pairing.challenge_generation();
+            std::string shown_code;
+            std::string shown_message = "Waiting for scan";
+            bool showing_code = false;
+            PairingState last_state = PairingState::Idle;
+            const auto deadline = Clock::now() + std::chrono::seconds(options.pair_timeout_seconds);
+            PairingStatus status;
+            bool paired = false;
+            auto last_render = Clock::now();
+            Clock::time_point scanned_at{};
+            bool auto_retry_done = false;
+
+            while (!quit && !platform.display->should_close()) {
+                poll_debug_input();
+                if (upgrade_puck()) {
+                    dirty = true;
+                }
+
+                PairingUpdate update;
+                while (pairing.take_update(&update)) {
+                    if (update.stale) {
+                        continue;
+                    }
+                    status = update.status;
+                    if (status.state == PairingState::Paired && options.pair_retry_on_paired) {
+                        // Simulate the user pressing Try Again just before this
+                        // Paired snapshot is consumed. The retry branch below
+                        // must win and discard the account.
+                        debug_handlers.pairing_retry();
+                    }
+                    if (status.state != last_state) {
+                        last_state = status.state;
+                        log::info("pairing state: %s", status.message.c_str());
+                    }
+                    const bool challenge_changed = update.generation != generation;
+                    if (challenge_changed) {
+                        generation = update.generation;
+                        shown_code.clear();
+                        showing_code = false;
+                        log::info("pairing challenge changed; scan the new QR");
+                    }
+                    if (status.state == PairingState::Scanned && !status.code.empty()) {
+                        if (status.code != shown_code || status.message != shown_message) {
+                            const bool code_changed = status.code != shown_code;
+                            shown_code = status.code;
+                            showing_code = true;
+                            shown_message = status.message;
+                            scanned_at = Clock::now();
+                            ui.set_pairing(pairing.qr(), "Confirm on Your Device",
+                                           status.message.empty()
+                                               ? std::string("Confirm on your device")
+                                               : status.message,
+                                           status.code);
+                            // The confirmation page owns the same Try Again
+                            // action as a failed round. Pressing it abandons
+                            // this challenge; any late paired reply is stale.
+                            ui.set_pairing_recovery(PairingRecovery::Retry);
+                            sync_pairing();
+                            render(true);
+                            dirty = false;
+                            if (code_changed) {
+                                log::info("pairing scanned; code %s", status.code.c_str());
+                            }
+                        }
+                    } else if (status.state == PairingState::Waiting ||
+                               status.state == PairingState::Failed) {
+                        if (showing_code || challenge_changed ||
+                            status.message != shown_message) {
+                            showing_code = false;
+                            shown_code.clear();
+                            shown_message = status.message;
+                            show_challenge(status.message, challenge_changed);
+                            dirty = false;
+                        }
+                    }
+                    if (status.state == PairingState::Paired) {
+                        // The confirmation page is no longer actionable; the
+                        // app takes ownership of this generation immediately.
+                        showing_code = false;
+                        shown_code.clear();
+                        shown_message.clear();
+                        ui.set_pairing_recovery(PairingRecovery::None);
+                        paired = true;
+                        break;
+                    }
+                }
+
+                // Try Again is live on both the failure page and the
+                // confirmation page. Checking it here, rather than only in
+                // wait_for_retry(), keeps the scan loop's own poll and input
+                // paths honest.
+                if (options.pair_retry_after_ms >= 0 && showing_code &&
+                    !auto_retry_done &&
+                    Clock::now() - scanned_at >=
+                        std::chrono::milliseconds(options.pair_retry_after_ms)) {
+                    // Exercise the same callback the confirmation page's
+                    // Try Again target dispatches to.
+                    debug_handlers.pairing_retry();
+                    auto_retry_done = true;
+                }
+                if (retry_requested) {
+                    retry_requested = false;
+                    // A Retry already requested by the user (or the test hook)
+                    // wins over an unconsumed Paired update in this same pass.
+                    // restart() discards that paired session; do not let the
+                    // stale local decision establish it on the next loop.
+                    paired = false;
+                    showing_code = false;
+                    shown_code.clear();
+                    shown_message.clear();
+                    ui.set_pairing_recovery(PairingRecovery::Retrying);
+                    ui.set_pairing(pairing.qr(), "Pairing",
+                                   "Generating a new pairing code", "");
+                    sync_pairing();
+                    render(true);
+                    dirty = false;
+                    if (restart_pairing()) {
+                        generation = pairing.challenge_generation();
+                        show_challenge("Waiting for scan", true);
+                    } else {
+                        ui.set_pairing_recovery(PairingRecovery::Retry);
+                        ui.set_pairing(QrCode{}, "Pairing Unavailable",
+                                       "Could not generate a new pairing code",
+                                       "");
+                        sync_pairing();
+                        render(true);
+                        dirty = false;
+                    }
+                    continue;
+                }
+                if (paired) {
+                    break;
+                }
+                if (status.state == PairingState::Failed ||
+                    status.state == PairingState::Expired) {
+                    break;
+                }
+                if (Clock::now() >= deadline) {
+                    pairing.expire("Pairing timed out");
+                    status.state = PairingState::Expired;
+                    status.message = "Pairing timed out";
+                    break;
+                }
+
+                if (puck_interaction.active()) {
+                    dirty = true;
+                }
+                const bool headless = std::string(platform.display->backend_name()) == "headless";
+                const bool desktop = std::string(platform.display->backend_name()) == "win32";
+                if (dirty || (diagnostics.is_open() && !headless &&
+                              Clock::now() - last_render >= std::chrono::milliseconds(100)) ||
+                    (desktop &&
+                     Clock::now() - last_render >= std::chrono::milliseconds(16))) {
+                    sync_pairing();
+                    render(true);
+                    last_render = Clock::now();
+                    dirty = false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            }
+
+            if (quit || platform.display->should_close()) {
+                return false;
+            }
+            if (!paired) {
+                // Do not join an in-flight claim here: expire() has already
+                // published the terminal state, and the old request can
+                // finish and clean its stale session in the background.
+                const bool expired = status.state == PairingState::Expired;
+                const std::string title = expired ? "Pairing Timed Out" : "Pairing Failed";
+                const std::string message =
+                    status.message.empty() ? std::string("Try Again") : status.message;
+                const int failed_generation = pairing.challenge_generation();
+                if (!wait_for_retry(title, message, failed_generation)) {
+                    return false;
+                }
+                continue;
+            }
+
+            pairing.stop_polling();
+            ui.set_pairing(pairing.qr(), "Connecting", "Paired. Starting session...");
             sync_pairing();
             render(true);
-            last_render = Clock::now();
-            dirty = false;
+
+            std::string setup_error;
+            bool setup_ok = pairing.establish_session(&error);
+            if (!setup_ok) {
+                setup_error = "Cannot create the car session: " + error;
+            } else if (!pairing.load_car_session(&session, &error)) {
+                setup_ok = false;
+                setup_error = "Cannot load the car session: " + error;
+            }
+            if (setup_ok) {
+                if (options.temporary_session) {
+                    // The session and cookie stay in memory for this kiosk
+                    // visit only. A crash or power loss must not leave the
+                    // previous user's account for the next driver.
+                    log::info("temporary car session for thread %s (not persisted)",
+                              session.thread_id.c_str());
+                } else if (pairing.persist(session, &error)) {
+                    log::info("car session saved for thread %s", session.thread_id.c_str());
+                } else {
+                    log::warn("cannot persist car session: %s", error.c_str());
+                }
+                pairing.acknowledge_paired();
+                return true;
+            }
+
+            log::error("car session setup: %s", setup_error.c_str());
+            const int failed_generation = pairing.challenge_generation();
+            if (!wait_for_retry("Cannot Start Puck", setup_error, failed_generation)) {
+                return false;
+            }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    }
-
-    if (quit || platform.display->should_close()) {
-        assets.wait();
-        return 0;
-    }
-    if (status.state != PairingState::Paired) {
-        log::error("pairing did not complete within %d seconds", options.pair_timeout_seconds);
-        return 1;
-    }
-
-    ui.set_pairing(pairing.qr(), "Connecting", "Paired. Starting session...");
-    sync_pairing();
-    render(true);
+    };
 
     if (!resumed) {
-        if (!pairing.establish_session(&error)) {
-            log::error("car session: %s", error.c_str());
-            return 1;
-        }
-
-        if (!pairing.load_car_session(&session, &error)) {
-            log::error("car data: %s", error.c_str());
-            return 1;
-        }
-
-        if (pairing.persist(session, &error)) {
-            log::info("car session saved for thread %s", session.thread_id.c_str());
-        } else {
-            log::warn("cannot persist car session: %s", error.c_str());
+        if (!run_pairing_and_setup()) {
+            pairing.stop_polling();
+            assets.wait();
+            return 0;
         }
     }
 
     log::info("car session ready: thread=%s actor=%s capability=%s", session.thread_id.c_str(),
               redact_url(session.actor_base_url).c_str(),
               session.capability.empty() ? "default" : session.capability.c_str());
+
+    AuthorizationWatcher authorization(pairing);
 
     diagnostics.set_session(true, session.thread_id);
     if (platform.http) {
@@ -1197,90 +1659,211 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
         }
     }
 
+    auto leave_temporary_session = [&]() {
+        // Stop polling before the DELETE so a late claim cannot recreate the
+        // account after the local jar has been cleared.
+        pairing.stop_polling();
+        if (!options.temporary_session) {
+            return;
+        }
+        std::string leave_error;
+        pairing.leave_session(&leave_error);
+        if (!leave_error.empty()) {
+            log::warn("temporary session cleanup: %s", redact_text(leave_error).c_str());
+        }
+    };
+
     if (!platform.websockets) {
         log::error("WebSocket factory is unavailable");
+        leave_temporary_session();
+        if (options.temporary_session && !quit && !platform.display->should_close()) {
+            return kRestartPairing;
+        }
         return 2;
     }
 
-    std::string token_error;
-    if (!pairing.fetch_actor_token(&session, &token_error)) {
-        log::warn("thread actor token: %s (trying the gateway token)",
-                  redact_text(token_error).c_str());
-    }
-
     const std::string page_load_id = random_uuid();
-    std::string ready_error;
-    if (wait_actor_ready(*platform.http, session, page_load_id, &ready_error)) {
-        log::info("actor: ready");
-    } else {
-        log::warn("actor ready check: %s", redact_text(ready_error).c_str());
-    }
-
     const std::vector<HttpHeader> headers = {
         {"Origin", pairing.origin()},
         {"User-Agent", "puck-kiosk/0.1"},
     };
-    int resume_id = 0;
-    auto connect_actor = [&](std::unique_ptr<WebSocket>* out) {
+    std::atomic<int> resume_id{0};
+    auto open_actor_socket = [&](CarSession* next, std::string* prepare_error) {
         ActorEndpoint endpoint;
-        if (!build_actor_endpoint(session, page_load_id, &endpoint, &error)) {
-            log::error("actor endpoint: %s", error.c_str());
-            return false;
+        if (!build_actor_endpoint(*next, page_load_id, &endpoint, prepare_error)) {
+            return std::unique_ptr<WebSocket>{};
         }
         log::info("actor: connecting to %s", endpoint.display_url.c_str());
-        auto socket =
-            platform.websockets->connect(endpoint.url, headers, endpoint.subprotocols, &error);
+        auto socket = platform.websockets->connect(endpoint.url, headers,
+                                                   endpoint.subprotocols, prepare_error);
         if (!socket) {
-            log::error("actor connect: %s", redact_text(error).c_str());
-            return false;
+            return socket;
         }
-        // The actor only starts pushing after the client resumes its observer
-        // session; version 0 asks for the full snapshot.
         const std::string resume = nlohmann::json{
             {"jsonrpc", "2.0"},
-            {"id", "puck-kiosk-" + std::to_string(resume_id++)},
+            {"id", "puck-kiosk-" + std::to_string(resume_id.fetch_add(1))},
             {"method", "client_resume"},
             {"params", {{"version", 0}}},
         }.dump();
-        socket->send_text(resume);
-        *out = std::move(socket);
-        return true;
+        if (!socket->send_text(resume)) {
+            if (prepare_error) {
+                *prepare_error = "cannot send client_resume";
+            }
+            return std::unique_ptr<WebSocket>{};
+        }
+        return socket;
     };
 
-    std::unique_ptr<WebSocket> websocket;
-    if (!connect_actor(&websocket)) {
+    // The first token, readiness probe, and socket handshake all touch the
+    // network. Keep the pairing UI responsive and render a connecting state
+    // instead of blocking the window on the initial attach.
+    AsyncActorPrepare initial_prepare;
+    std::atomic<bool> initial_actor_token_ok{false};
+    const bool initial_started = initial_prepare.start(
+        [&](CarSession* next, std::unique_ptr<WebSocket>* out, std::string* prepare_error) {
+            std::string token_error;
+            if (pairing.fetch_actor_token(next, &token_error)) {
+                initial_actor_token_ok = true;
+            } else {
+                log::warn("thread actor token: %s (trying the gateway token)",
+                          redact_text(token_error).c_str());
+            }
+            std::string ready_error;
+            if (wait_actor_ready(*platform.http, *next, page_load_id, &ready_error)) {
+                log::info("actor: ready");
+            } else {
+                log::warn("actor ready check: %s", redact_text(ready_error).c_str());
+            }
+            *out = open_actor_socket(next, prepare_error);
+            return *out != nullptr;
+        },
+        session);
+    if (!initial_started) {
+        log::error("actor: cannot start the initial connection worker");
+        leave_temporary_session();
+        if (options.temporary_session && !quit && !platform.display->should_close()) {
+            return kRestartPairing;
+        }
         return 2;
     }
+
+    bool initial_rendered = false;
+    auto last_initial_render = Clock::now();
+    ActorPrepareResult initial_prepared;
+    while (!initial_prepare.take(&initial_prepared)) {
+        // This loop runs while the first token/readiness/WebSocket handshake is
+        // in flight. Pump the platform input here too: Win32 delivers messages
+        // only through input.poll(), so rendering alone would leave a slow
+        // handshake window unable to close or accept Escape.
+        poll_debug_input();
+        if (quit || platform.display->should_close()) {
+            initial_prepare.stop();
+            leave_temporary_session();
+            assets.wait();
+            return 0;
+        }
+        if (upgrade_puck()) {
+            dirty = true;
+        }
+        if (!initial_rendered || dirty ||
+            Clock::now() - last_initial_render >= std::chrono::milliseconds(100)) {
+            ui.set_pairing(pairing.qr(), "Connecting", "Preparing the actor connection");
+            ui.set_pairing_recovery(PairingRecovery::None);
+            sync_pairing();
+            render(true);
+            initial_rendered = true;
+            dirty = false;
+            last_initial_render = Clock::now();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    initial_prepare.stop();
+
+    std::unique_ptr<WebSocket> websocket;
+    if (!initial_prepared.ok || !initial_prepared.socket) {
+        log::error("actor connect: %s", redact_text(initial_prepared.error).c_str());
+        leave_temporary_session();
+        if (options.temporary_session && !quit && !platform.display->should_close()) {
+            return kRestartPairing;
+        }
+        return 2;
+    }
+    websocket = std::move(initial_prepared.socket);
+    session.ws_token = initial_prepared.session.ws_token;
     double token_exp = ws_token_exp_seconds(session.ws_token);
+    // Capability used to mint the token on the socket that is currently
+    // installed. A capability change during an async handshake must not let a
+    // read-only socket masquerade as the write socket.
+    std::string socket_capability =
+        initial_actor_token_ok ? initial_prepared.session.capability : "read";
 
     ActorReader reader;
     reader.start(websocket.get());
+    // True only after the current socket has received server traffic. A TCP or
+    // WebSocket open is not enough: RivetKit opens the socket before the actor
+    // and only answers client_resume once the observer is attached.
+    bool observer_ready = false;
     plugins.set_sender([&](const std::string& text) {
         return websocket && websocket->is_open() && websocket->send_text(text);
     });
 
     log::info("actor: connected; observing for %d seconds", options.actor_seconds);
 
+    if (!explicit_write_permission(session)) {
+        authorization.start(session);
+    }
+
     std::unique_ptr<voice::VoiceEngine> voice_engine;
     std::unique_ptr<CallController> call;
+    std::shared_ptr<CallInbox> call_inbox;
     voice::VoiceEngineStats final_stats;
     CallView ended_view;
     std::string call_error_text;
     bool call_failed = false;
     bool ended_by_user = false;
+    bool signaling_down = false;
+    bool attach_pending = false;
+    std::string attach_request_id;
+    std::string attach_error;
+    Clock::time_point attach_deadline{};
+    int attach_counter = 0;
+    int replay_counter = 0;
+    // The previous call's clean close was not confirmed. A new call must not
+    // reuse that actor connection; reconnect first and retry the old stop.
+    bool redial_needs_fresh_socket = false;
+    bool cleanup_stop_pending = false;
+    std::string cleanup_stop_request_id;
+    Clock::time_point cleanup_deadline{};
+    int cleanup_generation = 0;
+    int cleanup_counter = 0;
+    // Incremented whenever the installed socket changes. An unconfirmed close
+    // may only be cleared by a stop on a newer generation whose observer has
+    // already received its resume acknowledgement.
+    int socket_generation = 1;
+    bool fresh_socket_required = false;
+    auto next_reconnect = Clock::now();
+    bool prepare_wanted = false;
+    bool prepare_refresh = false;
     auto start_call = [&]() -> bool {
         if (!platform.audio) {
             log::error("voice: no audio backend is available");
             return false;
         }
         if (call) {
-            call->end("restarting the call");
-            call.reset();
+            // The old call must finish its close handshake and be released
+            // before another one can start on this actor connection.
+            log::warn("voice: refusing to start a second call before the first is released");
+            return false;
         }
         voice_engine.reset();
+        call_inbox.reset();
         ended_view = CallView{};
         call_error_text.clear();
         call_failed = false;
+        signaling_down = false;
+        attach_pending = false;
+        attach_request_id.clear();
+        attach_error.clear();
         voice::VoiceEngineOptions voice_options;
         voice_options.enable_aec = diagnostics.echo_mode() == EchoCancellationMode::On;
         voice_engine = std::make_unique<voice::VoiceEngine>(*platform.audio, voice_options);
@@ -1288,24 +1871,29 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
         call_options.mute_after_seconds = options.mute_after_seconds;
         call_options.end_after_seconds = options.end_after_seconds;
         call = std::make_unique<CallController>(*websocket, *voice_engine, call_options);
-        voice_engine->set_data_callback([&call](const std::string& text) {
-            if (call) {
-                call->on_data_message(text);
-            }
-        });
+        // The call back-pointer is reset by the UI thread on hangup. The data
+        // callback must outlive that reset, so it captures a per-call mailbox
+        // and only the main loop talks to the controller.
+        call_inbox = std::make_shared<CallInbox>();
+        const std::shared_ptr<CallInbox> inbox = call_inbox;
+        voice_engine->set_data_callback(
+            [inbox](const std::string& text) { inbox->on_data(text); });
         std::string call_error;
         if (!call->start(&call_error)) {
             log::error("voice: cannot start call: %s", call_error.c_str());
+            call_error_text = call_error;
+            call_failed = true;
+            ended_view = CallView{};
+            ended_view.phase = CallPhase::Failed;
+            ended_view.caption = "Call failed";
+            ended_view.detail = call_error + " — tap End, then Call to try again";
             call.reset();
             voice_engine.reset();
+            call_inbox.reset();
             return false;
         }
         return true;
     };
-
-    if (options.call && !start_call()) {
-        return 2;
-    }
 
     int message_count = 0;
     int passkey_request_id = 0;
@@ -1313,6 +1901,7 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
     auto last_ping = Clock::now();
     auto last_car_render = Clock::now();
     auto last_renew = Clock::now();
+    AsyncSessionRenew renew_task;
     const auto actor_deadline = Clock::now() + std::chrono::seconds(options.actor_seconds);
     const bool observe_forever = options.actor_seconds == 0;
 
@@ -1320,9 +1909,345 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
         PasskeyContext context;
         context.car_session = true;
         context.actor_connected = websocket && websocket->is_open();
-        context.can_write = session.capability.empty() || session.capability == "write";
+        context.can_write = explicit_write_permission(session);
         context.requires_sudo = session.requires_sudo_for_write;
         passkey.set_context(context);
+    };
+
+    auto send_attach = [&]() -> bool {
+        if (!call || !websocket || !websocket->is_open()) {
+            return false;
+        }
+        const std::string session_id = call->session_id();
+        if (session_id.empty()) {
+            return false;
+        }
+        const std::string request_id =
+            "puck-voice-attach-" + std::to_string(++attach_counter);
+        nlohmann::json params;
+        params["transport"] = {{"type", "webrtc_attach"}, {"sessionID", session_id}};
+        params["mediaKinds"] = nlohmann::json::array({"image"});
+        const nlohmann::json request = {
+            {"jsonrpc", "2.0"},
+            {"id", request_id},
+            {"method", "client_puck_voice_start"},
+            {"params", params},
+        };
+        if (!websocket->send_text(request.dump())) {
+            log::warn("voice: cannot send the reattach request");
+            return false;
+        }
+        attach_request_id = request_id;
+        attach_pending = true;
+        attach_deadline = Clock::now() + std::chrono::seconds(5);
+        log::info("voice: reattach sent for session %s",
+                  redact_text(session_id).c_str());
+        return true;
+    };
+
+    auto send_replay = [&](std::deque<nlohmann::json> events) -> bool {
+        if (events.empty() || !websocket || !websocket->is_open()) {
+            return events.empty();
+        }
+        nlohmann::json params;
+        params["events"] = nlohmann::json::array();
+        for (const nlohmann::json& event : events) {
+            params["events"].push_back(event);
+        }
+        const nlohmann::json request = {
+            {"jsonrpc", "2.0"},
+            {"id", "puck-voice-replay-" + std::to_string(++replay_counter)},
+            {"method", "client_puck_voice_replay"},
+            {"params", params},
+        };
+        const bool sent = websocket->send_text(request.dump());
+        if (!sent) {
+            log::warn("voice: cannot replay %zu missed event(s)", events.size());
+        } else {
+            log::info("voice: replayed %zu event(s) missed while the actor was away",
+                      events.size());
+        }
+        return sent;
+    };
+
+    auto send_cleanup_stop = [&]() -> bool {
+        if (!websocket || !websocket->is_open() ||
+            socket_generation <= cleanup_generation) {
+            return false;
+        }
+        cleanup_stop_request_id =
+            "puck-voice-cleanup-" + std::to_string(++cleanup_counter);
+        const nlohmann::json request = {
+            {"jsonrpc", "2.0"},
+            {"id", cleanup_stop_request_id},
+            {"method", "client_puck_voice_stop"},
+            {"params", nlohmann::json::object()},
+        };
+        if (!websocket->send_text(request.dump())) {
+            cleanup_stop_request_id.clear();
+            return false;
+        }
+        cleanup_stop_pending = true;
+        cleanup_deadline = Clock::now() + std::chrono::seconds(5);
+        log::info("voice: retrying the previous stop on generation %d", socket_generation);
+        return true;
+    };
+
+    AsyncActorPrepare actor_prepare;
+    auto prepare_actor = [&](bool refresh_token) -> bool {
+        const bool started = actor_prepare.start(
+            [&, refresh_token](CarSession* next, std::unique_ptr<WebSocket>* out,
+                               std::string* prepare_error) {
+                if (refresh_token && !pairing.fetch_actor_token(next, prepare_error)) {
+                    return false;
+                }
+                ActorEndpoint endpoint;
+                if (!build_actor_endpoint(*next, page_load_id, &endpoint, prepare_error)) {
+                    return false;
+                }
+                log::info("actor: connecting to %s", endpoint.display_url.c_str());
+                auto socket = platform.websockets->connect(endpoint.url, headers,
+                                                            endpoint.subprotocols,
+                                                            prepare_error);
+                if (!socket) {
+                    return false;
+                }
+                const std::string resume = nlohmann::json{
+                    {"jsonrpc", "2.0"},
+                    {"id", "puck-kiosk-" + std::to_string(resume_id.fetch_add(1))},
+                    {"method", "client_resume"},
+                    {"params", {{"version", 0}}},
+                }.dump();
+                if (!socket->send_text(resume)) {
+                    if (prepare_error) {
+                        *prepare_error = "cannot send client_resume";
+                    }
+                    return false;
+                }
+                *out = std::move(socket);
+                return true;
+            },
+            session);
+        if (started) {
+            log::info("actor: preparing a %s socket in the background",
+                      refresh_token ? "refreshed" : "replacement");
+        }
+        return started;
+    };
+
+    auto request_prepare = [&](bool refresh_token) {
+        prepare_refresh = prepare_refresh || refresh_token;
+        if (actor_prepare.busy()) {
+            prepare_wanted = true;
+            return;
+        }
+        if (prepare_actor(prepare_refresh)) {
+            prepare_wanted = false;
+        } else {
+            prepare_wanted = true;
+        }
+    };
+
+    // A close that was not confirmed, or a cleanup stop that failed, may only
+    // be retried on a new socket generation. Keep the old socket open for
+    // media/reporting, but make it unable to unlock the call button.
+    auto begin_fresh_socket_cleanup = [&]() {
+        cleanup_stop_pending = false;
+        cleanup_stop_request_id.clear();
+        cleanup_deadline = Clock::time_point{};
+        cleanup_generation = socket_generation;
+        fresh_socket_required = true;
+        observer_ready = false;
+        signaling_down = true;
+        next_reconnect = Clock::now();
+        request_prepare(false);
+    };
+
+    auto apply_prepared = [&](ActorPrepareResult& prepared) -> bool {
+        if (!prepared.ok || !prepared.socket) {
+            return false;
+        }
+        if (prepared.session.capability != session.capability) {
+            log::warn("actor: discarding a prepared %s socket after the capability became %s",
+                      prepared.session.capability.empty() ? "default"
+                                                         : prepared.session.capability.c_str(),
+                      session.capability.empty() ? "default" : session.capability.c_str());
+            return false;
+        }
+        const int previous_generation = socket_generation;
+        reader.stop();
+        if (websocket) {
+            websocket->close();
+        }
+        websocket = std::move(prepared.socket);
+        // Keep the UI's current capability: the worker only owns the token and
+        // socket. A capability change during the handshake triggers another
+        // preparation instead of silently connecting read-only after write.
+        session.ws_token = prepared.session.ws_token;
+        socket_capability = prepared.session.capability;
+        token_exp = ws_token_exp_seconds(session.ws_token);
+        // An attach sent on the old socket can never be acknowledged here.
+        attach_pending = false;
+        attach_request_id.clear();
+        if (redial_needs_fresh_socket && cleanup_stop_pending) {
+            // The receipt belonged to the old generation; replay the cleanup
+            // again after this socket's observer is ready.
+            cleanup_stop_pending = false;
+            cleanup_stop_request_id.clear();
+            cleanup_deadline = Clock::time_point{};
+            cleanup_generation = previous_generation;
+        }
+        ++socket_generation;
+        fresh_socket_required = false;
+        reader.start(websocket.get());
+        observer_ready = false;
+        if (call) {
+            call->rebind_actor(*websocket);
+            if (call->active() && !call->ended() && !call->failed() &&
+                !call->view().closing && !signaling_down) {
+                // A planned token/write-access socket swap is still a
+                // signaling gap for this call: media stays, events buffer,
+                // and the observer-ready path reattaches.
+                signaling_down = true;
+                if (call_inbox) {
+                    call_inbox->begin_replay();
+                }
+            }
+        }
+        // The new observer's snapshot is authoritative. Drop the old sheet
+        // list now; answered IDs remain suppressed when the snapshot arrives.
+        plugins.reset_requests(false);
+        last_ping = Clock::now();
+        log::info("actor: replacement socket installed (open=%d); waiting for observer readiness",
+                  websocket && websocket->is_open() ? 1 : 0);
+        return true;
+    };
+
+    // The main loop and the bounded exit drain must make the same decision
+    // about a terminal call. In particular, an unconfirmed close on display
+    // exit still needs the fresh-socket cleanup; a confirmed close must never
+    // send an extra stop.
+    auto finish_call_terminal = [&](bool user_hangup) {
+        if (!call) {
+            return false;
+        }
+        if (voice_engine) {
+            final_stats = voice_engine->stats();
+        }
+        ended_view = call->view();
+        const bool confirmed = ended_view.close_confirmed;
+        call_failed = call->failed();
+        call_error_text = call->last_error();
+        media.close();
+        plugins.reset_requests(false);
+        call.reset();
+        voice_engine.reset();
+        call_inbox.reset();
+        signaling_down = false;
+        attach_pending = false;
+        attach_request_id.clear();
+        // The stop receipt / session.closed handshake must be complete before
+        // another call may reuse this actor connection.
+        redial_needs_fresh_socket = !confirmed;
+        cleanup_stop_pending = false;
+        cleanup_stop_request_id.clear();
+        cleanup_deadline = Clock::time_point{};
+        if (confirmed) {
+            fresh_socket_required = false;
+            if (user_hangup) {
+                // A normal user hangup goes straight back to the green call
+                // control, not through a transient Ended page.
+                ended_view = CallView{};
+                call_failed = false;
+            }
+        } else {
+            log::warn("voice: close was not confirmed; forcing a fresh actor socket "
+                      "before another call");
+            begin_fresh_socket_cleanup();
+        }
+        ended_by_user = false;
+        return confirmed;
+    };
+
+    // The coordinator remains the UI state for explicit write access. Its
+    // token/socket callbacks are unused; the async worker above owns that I/O.
+    WriteAccessCoordinator write_access([](std::string*) { return false; },
+                                        [](std::string*) { return false; });
+    if (explicit_write_permission(session)) {
+        write_access.set_write(true);
+        if (initial_actor_token_ok) {
+            write_access.mark_ready();
+        } else {
+            request_prepare(true);
+        }
+    }
+
+    auto write_wait_view = [&]() {
+        PasskeyView view;
+        // The existing call control stays disabled for Phone mode while the
+        // write-authorized socket is being prepared.
+        view.mode = PasskeyMode::Phone;
+        view.title = "Securing Write Access";
+        view.steps = {
+            {"Refreshing write access",
+             "The car is preparing a new authorized actor connection."},
+            {"Waiting for the actor",
+             "It retries automatically; the call button unlocks when ready."},
+        };
+        view.status = write_access.message();
+        return view;
+    };
+
+    CallGate call_gate;
+    call_gate.update(explicit_write_permission(session) && write_access.write_ready() &&
+                         observer_ready,
+                     websocket && websocket->is_open() && !signaling_down);
+    // --call is the same explicit request as tapping the button. If the car is
+    // read-only, the write socket is still being prepared, or the socket has
+    // not received its resume acknowledgement, the request waits.
+    if (options.call && call_gate.request()) {
+        if (!start_call()) {
+            const bool visible = backend_name != "headless" && backend_name != "win32-headless";
+            if (!visible) {
+                return 2;
+            }
+            log::warn("voice: waiting on the car screen; the call can be retried");
+        }
+    }
+
+    auto apply_authorization = [&](const AuthorizationStatus& update) -> bool {
+        if (!update.valid) {
+            return true;
+        }
+        if (!update.error.empty()) {
+            log::warn("car authorization: %s", redact_text(update.error).c_str());
+            return true;
+        }
+        if (!update.changed) {
+            return true;
+        }
+        session.capability = update.session.capability;
+        session.requires_sudo_for_write = update.session.requires_sudo_for_write;
+        log::info("car authorization: capability=%s",
+                  session.capability.empty() ? "default" : session.capability.c_str());
+        std::string persist_error;
+        if (!options.temporary_session && !pairing.persist(session, &persist_error)) {
+            log::warn("cannot persist the refreshed authorization: %s",
+                      redact_text(persist_error).c_str());
+        }
+        if (explicit_write_permission(session)) {
+            write_access.set_write(true);
+            // Refresh the token and open a write socket off the UI thread.
+            request_prepare(true);
+            authorization.stop();
+        } else {
+            write_access.set_write(false);
+            // A click made while write access was revoked must not fire if
+            // access is granted again later; the user has to ask again.
+            call_gate.reset();
+        }
+        update_passkey_context();
+        return true;
     };
 
     auto sync_car = [&]() {
@@ -1343,22 +2268,64 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
         }
         ui.set_visual(visual);
         ui.set_sheet(plugins.sheet());
-        ui.set_passkey(passkey.view());
+        ui.set_passkey(write_access.waiting() && explicit_write_permission(session)
+                           ? write_wait_view()
+                           : passkey.view());
+        ui.set_call_available(explicit_write_permission(session) && write_access.write_ready() &&
+                              observer_ready && websocket && websocket->is_open() &&
+                              !signaling_down && !redial_needs_fresh_socket &&
+                              !(call && call->view().closing));
+        if (voice_engine) {
+            diagnostics.set_call_aec_status(call && call->active() && !call->ended() &&
+                                                !call->failed(),
+                                            voice_engine->aec_status());
+        } else {
+            diagnostics.set_call_aec_status(false, voice::AecStatus{});
+        }
         ui.set_debug(diagnostics.view());
         diagnostics.set_call_active(call && call->active());
     };
 
+    bool car_dirty = true;
     UiActionHandlers handlers;
-    handlers.call = [&]() { start_call(); };
+    handlers.call = [&]() {
+        // Re-check at click/activation time rather than trusting the frame
+        // that drew the button: pairing, authorization, and the socket can
+        // all change between press and release.
+        call_gate.update(explicit_write_permission(session) && write_access.write_ready() &&
+                             observer_ready && !redial_needs_fresh_socket &&
+                             !(call && call->view().closing),
+                         websocket && websocket->is_open() && !signaling_down);
+        if (call_gate.request()) {
+            start_call();
+        }
+    };
     handlers.mute = [&]() {
-        if (call) {
+        if (call && !call->view().closing) {
             call->mute(!call->view().muted);
         }
     };
     handlers.end = [&]() {
         if (call) {
+            if (call->view().closing) {
+                // The close handshake is already in flight; a second End or a
+                // mute press must not send another stop or reopen audio.
+                return;
+            }
             ended_by_user = true;
             call->end("ended from the car screen");
+            return;
+        }
+        if (ended_view.phase == CallPhase::Ended || ended_view.phase == CallPhase::Failed) {
+            // The Web keeps the failed call object until the user ends it;
+            // the next frame is the normal green call control. A close that
+            // was not confirmed still forces the fresh-socket cleanup first.
+            ended_view = CallView{};
+            call_failed = false;
+            if (redial_needs_fresh_socket) {
+                begin_fresh_socket_cleanup();
+            }
+            car_dirty = true;
         }
     };
     handlers.media_close = [&]() { media.close(); };
@@ -1449,6 +2416,95 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
         }
         ++message_count;
         log_actor_message(message);
+        const nlohmann::json parsed = nlohmann::json::parse(message, nullptr, false);
+        if (attach_pending && !attach_request_id.empty()) {
+            auto check_attach = [&](const nlohmann::json& value) {
+                if (!value.is_object() || !value.contains("id") ||
+                    !value["id"].is_string() ||
+                    value["id"].get<std::string>() != attach_request_id) {
+                    return false;
+                }
+                if (!value.contains("jsonrpc") || !value["jsonrpc"].is_string() ||
+                    value["jsonrpc"].get<std::string>() != "2.0" ||
+                    value.contains("method")) {
+                    return false;
+                }
+                attach_pending = false;
+                attach_request_id.clear();
+                if (value.contains("error")) {
+                    attach_error = redact_json(value["error"].dump(), 200);
+                    log::warn("voice: reattach rejected: %s", attach_error.c_str());
+                    signaling_down = false;
+                    if (call_inbox) {
+                        call_inbox->take_replay();
+                    }
+                    if (call) {
+                        call->fail_recovery("voice reattach rejected: " + attach_error);
+                    }
+                } else {
+                    // A void result is a valid JSON-RPC success.
+                    signaling_down = false;
+                    log::info("voice: reattach acknowledged");
+                    if (call_inbox) {
+                        send_replay(call_inbox->take_replay());
+                    }
+                }
+                return true;
+            };
+            if (parsed.is_array()) {
+                for (const nlohmann::json& entry : parsed) {
+                    if (check_attach(entry)) {
+                        break;
+                    }
+                }
+            } else {
+                check_attach(parsed);
+            }
+        }
+        if (cleanup_stop_pending && !cleanup_stop_request_id.empty()) {
+            auto check_cleanup = [&](const nlohmann::json& value) {
+                if (!value.is_object() || !value.contains("id") ||
+                    !value["id"].is_string() ||
+                    value["id"].get<std::string>() != cleanup_stop_request_id) {
+                    return false;
+                }
+                if (!value.contains("jsonrpc") || !value["jsonrpc"].is_string() ||
+                    value["jsonrpc"].get<std::string>() != "2.0" ||
+                    value.contains("method")) {
+                    return false;
+                }
+                // The actor's void success is an id-only JSON-RPC response.
+                // What matters is that this is a response-shaped frame with no
+                // error; a method call with the same id is not a receipt.
+                if (value.contains("error")) {
+                    log::warn("voice: previous-session stop retry rejected: %s",
+                              redact_json(value["error"].dump(), 200).c_str());
+                    // A rejected stop is not a cleanup. Keep the gate closed
+                    // and retry on another socket generation.
+                    begin_fresh_socket_cleanup();
+                    return true;
+                }
+                if (socket_generation <= cleanup_generation) {
+                    return true;
+                }
+                log::info("voice: previous-session stop retry acknowledged on generation %d",
+                          socket_generation);
+                cleanup_stop_pending = false;
+                cleanup_stop_request_id.clear();
+                cleanup_deadline = Clock::time_point{};
+                redial_needs_fresh_socket = false;
+                return true;
+            };
+            if (parsed.is_array()) {
+                for (const nlohmann::json& entry : parsed) {
+                    if (check_cleanup(entry)) {
+                        break;
+                    }
+                }
+            } else {
+                check_cleanup(parsed);
+            }
+        }
         if (call) {
             call->on_actor_message(message);
         }
@@ -1490,6 +2546,7 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
         }
     };
 
+    bool exit_after_script_leave = false;
     if (!options.input_script.empty()) {
         use_script_time = true;
         update_passkey_context();
@@ -1530,15 +2587,13 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
         sync_car();
         render(true);
         if (options.exit_after_script) {
+            // Leave through the common close path so an active call drains,
+            // and shared mode can DELETE and clear the cookie jar.
             log::info("input script finished; leaving the car screen");
-            if (call) {
-                final_stats = voice_engine->stats();
-                call->end("input script finished");
-            }
-            reader.stop();
-            return 0;
+            exit_after_script_leave = true;
+        } else {
+            use_script_time = false;
         }
-        use_script_time = false;
     }
 
     if (options.input_script.empty()) {
@@ -1550,10 +2605,55 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
         sync_car();
     }
 
-    bool running = !quit;
-    bool car_dirty = true;
+    bool running = !quit && !exit_after_script_leave;
+    bool restart_after_leave = false;
+    bool draining_cleanup = false;
+    auto cleanup_exit_deadline = Clock::now() + std::chrono::seconds(10);
+    int reconnect_attempts = 0;
+    // Any visible backend keeps a failed/ended call on screen with a route
+    // back to the call button. Only the headless CLI exits after its report.
+    const bool desktop_ui = backend_name != "headless" && backend_name != "win32-headless";
+    auto temporary_idle_deadline = Clock::now() + std::chrono::minutes(3);
+    auto on_observer_ready = [&]() {
+        if (observer_ready || fresh_socket_required || !reader.server_communicated()) {
+            return;
+        }
+        observer_ready = true;
+        log::info("actor: observer ready on the current socket");
+        if (explicit_write_permission(session) && socket_capability == "write") {
+            // The current socket has now received its resume ack. Whether this
+            // is the initial write socket or a replacement prepared after a
+            // read-to-write change, the gate can open.
+            write_access.mark_ready();
+        }
+        if (call && call->active() && !call->ended() && !call->failed() &&
+            !call->view().closing) {
+            if (call->session_id().empty()) {
+                call->fail_recovery("signaling was lost before the voice session was established");
+            } else if (!attach_pending) {
+                send_attach();
+            }
+        } else if (signaling_down) {
+            signaling_down = false;
+            if (call_inbox) {
+                send_replay(call_inbox->take_replay());
+            }
+            if (redial_needs_fresh_socket && !cleanup_stop_pending &&
+                socket_generation > cleanup_generation) {
+                if (!send_cleanup_stop()) {
+                    begin_fresh_socket_cleanup();
+                }
+            }
+        }
+        car_dirty = true;
+    };
     while (running && !platform.display->should_close() &&
-           (observe_forever || Clock::now() < actor_deadline || (call && call->active()))) {
+           (observe_forever || Clock::now() < actor_deadline || (call && call->active()) ||
+            write_access.waiting() || call_gate.pending() ||
+            passkey.mode() == PasskeyMode::Phone ||
+            (draining_cleanup && Clock::now() < cleanup_exit_deadline) ||
+            (desktop_ui && (ended_view.phase == CallPhase::Ended ||
+                            ended_view.phase == CallPhase::Failed)))) {
         if (upgrade_puck()) {
             car_dirty = true;
         }
@@ -1566,8 +2666,114 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
         if (!poll_error.empty()) {
             log::warn("actor: %s", redact_text(poll_error).c_str());
         }
-        if (reader.drained_and_closed()) {
+
+        // The socket is only ready for a call once the server has answered on
+        // this connection. This is deliberately after the frame is queued, so
+        // the first handler sees the resume response before any start request.
+        on_observer_ready();
+        if (attach_pending && Clock::now() >= attach_deadline) {
+            attach_pending = false;
+            attach_error = "the actor did not acknowledge the voice reattach";
+            log::warn("voice: %s", attach_error.c_str());
+            if (call) {
+                call->fail_recovery("voice reattach timed out");
+            }
+            car_dirty = true;
+        }
+        if (cleanup_stop_pending && Clock::now() >= cleanup_deadline) {
+            log::warn("voice: cleanup stop receipt timed out; moving to a fresh socket");
+            begin_fresh_socket_cleanup();
+            car_dirty = true;
+        }
+        if (draining_cleanup && !redial_needs_fresh_socket && !cleanup_stop_pending) {
+            log::info("voice: previous-session cleanup confirmed; leaving the car screen");
+            running = false;
             break;
+        }
+        if (draining_cleanup && Clock::now() >= cleanup_exit_deadline) {
+            log::warn("voice: previous-session cleanup did not confirm before the exit bound");
+            running = false;
+            break;
+        }
+
+        if (reader.drained_and_closed()) {
+            if (!signaling_down) {
+                signaling_down = true;
+                log::warn("actor: signaling closed; keeping the current media session");
+                if (call_inbox) {
+                    call_inbox->begin_replay();
+                }
+                next_reconnect = Clock::now();
+            }
+            if (redial_needs_fresh_socket && !fresh_socket_required) {
+                begin_fresh_socket_cleanup();
+            }
+        }
+        if (signaling_down && (!websocket || !websocket->is_open()) &&
+            Clock::now() >= next_reconnect) {
+            const auto now = std::chrono::duration<double>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+            request_prepare(token_exp > 0.0 && now >= token_exp - 45.0);
+            car_dirty = true;
+        }
+
+        ActorPrepareResult prepared;
+        if (actor_prepare.take(&prepared)) {
+            if (prepared.ok && apply_prepared(prepared)) {
+                prepare_wanted = false;
+                prepare_refresh = false;
+                reconnect_attempts = 0;
+            } else {
+                ++reconnect_attempts;
+                const auto backoff = std::chrono::milliseconds(
+                    std::min(5000, 250 * (1 << std::min(reconnect_attempts, 4))));
+                next_reconnect = Clock::now() + backoff;
+                prepare_wanted = prepare_wanted || prepare_refresh ||
+                                 write_access.waiting() || signaling_down;
+                log::warn("actor: background preparation failed (%s); retrying in %lld ms",
+                          redact_text(prepared.error).c_str(),
+                          static_cast<long long>(backoff.count()));
+            }
+            car_dirty = true;
+        }
+        if (prepare_wanted && !actor_prepare.busy() && Clock::now() >= next_reconnect) {
+            if (prepare_actor(prepare_refresh)) {
+                prepare_wanted = false;
+            } else {
+                next_reconnect = Clock::now() + std::chrono::milliseconds(500);
+            }
+            car_dirty = true;
+        }
+
+        // DataChannel callbacks only enqueue. session.closed, plugin data, and
+        // anything else are delivered to the controller on this thread, where
+        // its lifetime is stable.
+        if (call && call_inbox) {
+            std::deque<std::string> data = call_inbox->take_data();
+            for (const std::string& text : data) {
+                call->on_data_message(text);
+            }
+        }
+
+        AuthorizationStatus authorization_update;
+        while (authorization.take(&authorization_update)) {
+            if (!apply_authorization(authorization_update)) {
+                running = false;
+                break;
+            }
+            car_dirty = true;
+        }
+        if (!running) {
+            break;
+        }
+        if (call_gate.update(explicit_write_permission(session) && write_access.write_ready() &&
+                                 observer_ready && !redial_needs_fresh_socket,
+                             websocket && websocket->is_open() && !signaling_down)) {
+            if (!start_call()) {
+                log::error("voice: the authorized call request could not start");
+            }
+            car_dirty = true;
         }
 
         const UiFocusResult hold = focus.update(elapsed_seconds());
@@ -1626,19 +2832,36 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
             break;
         }
 
-        if (Clock::now() - last_renew >= std::chrono::seconds(30) && !media.busy()) {
+        if (Clock::now() - last_renew >= std::chrono::seconds(30) && !media.busy() &&
+            !renew_task.busy()) {
             last_renew = Clock::now();
-            std::string renew_error;
-            if (!pairing.establish_session(&renew_error)) {
+            renew_task.start([&](std::string* renew_error) {
+                return pairing.establish_session(renew_error);
+            });
+        }
+        bool renew_ok = false;
+        std::string renew_error;
+        if (renew_task.take(&renew_ok, &renew_error)) {
+            if (!renew_ok) {
                 log::warn("car session renew: %s", redact_text(renew_error).c_str());
-                if (call && renew_error.find("401") != std::string::npos) {
-                    call->end("car session expired");
+                if (renew_error.find("401") != std::string::npos) {
+                    if (call) {
+                        call->end("car session expired");
+                    } else if (options.temporary_session) {
+                        // An idle shared session that cannot renew must not
+                        // leave the previous account on screen.
+                        log::info("temporary session expired; returning to pairing");
+                        restart_after_leave = true;
+                        running = false;
+                        break;
+                    }
                 }
             } else {
                 // The session cookie rotates on every renew; keep the stored
                 // copy current or the next process resumes with a dead cookie.
                 std::string persist_error;
-                if (!pairing.persist(session, &persist_error)) {
+                if (!options.temporary_session &&
+                    !pairing.persist(session, &persist_error)) {
                     log::warn("cannot persist renewed session: %s",
                               redact_text(persist_error).c_str());
                 }
@@ -1647,26 +2870,11 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
         const double now = std::chrono::duration<double>(
                                std::chrono::system_clock::now().time_since_epoch())
                                .count();
-        if (token_exp > 0.0 && now >= token_exp - 45.0 && !media.busy()) {
-            std::string refresh_error;
-            if (pairing.fetch_actor_token(&session, &refresh_error)) {
-                token_exp = ws_token_exp_seconds(session.ws_token);
-                reader.stop();
-                websocket->close();
-                if (!connect_actor(&websocket)) {
-                    break;
-                }
-                reader.start(websocket.get());
-                if (call) {
-                    call->rebind_actor(*websocket);
-                    call->reattach();
-                }
-                last_ping = Clock::now();
-                log::info("actor: reconnected with a refreshed token");
-            } else {
-                log::warn("actor token refresh: %s", redact_text(refresh_error).c_str());
-                token_exp = 0.0;
-            }
+        if (token_exp > 0.0 && now >= token_exp - 45.0 && !media.busy() &&
+            !actor_prepare.busy() && !prepare_wanted) {
+            // The old socket stays usable while the worker refreshes the token
+            // and opens its replacement.
+            request_prepare(true);
         }
         if (websocket->is_open() && Clock::now() - last_ping >= std::chrono::seconds(30)) {
             websocket->send_text("ping");
@@ -1678,23 +2886,44 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
             final_stats = voice_engine->stats();
             call->tick(Clock::now());
             if (call->ended() || call->failed()) {
-                const bool failed_now = call->failed();
-                ended_view = call->view();
-                call_failed = failed_now;
-                call_error_text = call->last_error();
-                media.close();
-                call.reset();
-                voice_engine.reset();
-                // A call ended from the car screen leaves the car UI running;
-                // a scheduled or remote end keeps the observation loop's
-                // existing exit behaviour.
-                if (failed_now || !ended_by_user) {
-                    sync_car();
-                    render(true);
+                const bool user_hangup = ended_by_user;
+                finish_call_terminal(user_hangup);
+                car_dirty = true;
+                sync_car();
+                render(true);
+                if (options.temporary_session) {
+                    restart_after_leave = true;
+                    running = false;
                     break;
                 }
-                ended_by_user = false;
-                car_dirty = true;
+                if (!desktop_ui) {
+                    if (redial_needs_fresh_socket) {
+                        // Headless still has to finish the old-session cleanup
+                        // on a fresh socket before exiting. Keep the reader and
+                        // the preparation worker running for a bounded time.
+                        draining_cleanup = true;
+                        cleanup_exit_deadline = Clock::now() + std::chrono::seconds(10);
+                        continue;
+                    }
+                    // The terminal state is reached and the close sequence has
+                    // released the peer.
+                    running = false;
+                    break;
+                }
+                // A normal desktop keeps the car screen on a failure or a
+                // remote hangup, with the End control as the route back to
+                // the green call button.
+                continue;
+            }
+        }
+        if (options.temporary_session) {
+            if (call) {
+                temporary_idle_deadline = Clock::now() + std::chrono::minutes(3);
+            } else if (Clock::now() >= temporary_idle_deadline) {
+                log::info("temporary session idle for 3 minutes; returning to pairing");
+                restart_after_leave = true;
+                running = false;
+                break;
             }
         }
         update_passkey_context();
@@ -1727,7 +2956,58 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
     media.close();
     if (call && !call->ended() && !call->failed()) {
         final_stats = voice_engine->stats();
-        call->end("actor observation finished");
+        call->end("leaving the car screen");
+        // Window close, CLI exit, and a lost actor all leave through here.
+        // Pump the actor and the call state machine for a bounded time so the
+        // stop/close handshake can finish instead of dropping the peer early.
+        const auto close_deadline = Clock::now() + std::chrono::seconds(5);
+        while (!call->ended() && !call->failed() && Clock::now() < close_deadline) {
+            std::string message;
+            while (reader.take(&message, nullptr)) {
+                handle_actor_message(message);
+            }
+            if (call && call_inbox) {
+                std::deque<std::string> data = call_inbox->take_data();
+                for (const std::string& text : data) {
+                    call->on_data_message(text);
+                }
+            }
+            final_stats = voice_engine->stats();
+            call->tick(Clock::now());
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!call->ended() && !call->failed()) {
+            log::warn("voice: close sequence did not complete before the exit bound");
+        }
+    }
+    if (call && (call->ended() || call->failed())) {
+        // Use the same terminal decision as the main loop. Display budget
+        // exhaustion can end the UI loop while the call is still active, and
+        // an unconfirmed stop must still run the fresh-socket cleanup.
+        finish_call_terminal(ended_by_user);
+    }
+    if (call) {
+        // The close handshake did not reach ended()/failed() within the bound.
+        // Release the controller and treat the close as unconfirmed so the
+        // bounded cleanup drain below still runs.
+        log::warn("voice: releasing an unfinished call at the exit bound");
+        if (voice_engine) {
+            final_stats = voice_engine->stats();
+        }
+        media.close();
+        plugins.reset_requests(false);
+        call.reset();
+        voice_engine.reset();
+        call_inbox.reset();
+        signaling_down = false;
+        attach_pending = false;
+        attach_request_id.clear();
+        redial_needs_fresh_socket = true;
+        cleanup_stop_pending = false;
+        cleanup_stop_request_id.clear();
+        cleanup_deadline = Clock::time_point{};
+        begin_fresh_socket_cleanup();
+        ended_by_user = false;
     }
     if (call_failed) {
         log::error("voice: call failed: %s", call_error_text.c_str());
@@ -1748,6 +3028,38 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
             final_stats.output_level);
     }
 
+    // A window close can land after an unconfirmed call close but before the
+    // cleanup stop was retried. Finish that bounded recovery before dropping
+    // the actor socket so the next launch does not inherit an unconfirmed
+    // session. Headless/CLI normally does this in the main loop.
+    if (!call && redial_needs_fresh_socket) {
+        log::info("voice: finishing previous-session cleanup before exit");
+        const auto exit_cleanup_deadline = Clock::now() + std::chrono::seconds(10);
+        while (redial_needs_fresh_socket && Clock::now() < exit_cleanup_deadline) {
+            std::string message;
+            while (reader.take(&message, nullptr)) {
+                handle_actor_message(message);
+            }
+            on_observer_ready();
+            ActorPrepareResult prepared;
+            if (actor_prepare.take(&prepared)) {
+                if (!prepared.ok || !apply_prepared(prepared)) {
+                    prepare_wanted = true;
+                }
+            }
+            if ((prepare_wanted || fresh_socket_required) && !actor_prepare.busy()) {
+                request_prepare(false);
+            }
+            if (cleanup_stop_pending && Clock::now() >= cleanup_deadline) {
+                begin_fresh_socket_cleanup();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (redial_needs_fresh_socket) {
+            log::warn("voice: previous-session cleanup remained unconfirmed at the exit bound");
+        }
+    }
+
     const bool actor_was_open = websocket->is_open();
     const std::string close_reason = websocket->close_reason();
     reader.stop();
@@ -1756,6 +3068,29 @@ int run_session(const AppOptions& options, Platform& platform, Renderer& rendere
         log::info("actor: closed (%s)", redact_text(close_reason).c_str());
     }
     log::info("actor: observed %d message(s)", message_count);
+
+    if (options.temporary_session) {
+        // Shared kiosk: DELETE the temporary session while the cookie is
+        // still present, then erase the saved session and the in-memory jar.
+        // Stop every background network worker first so a late renew/token
+        // fetch cannot recreate the account after the delete.
+        renew_task.stop();
+        actor_prepare.stop();
+        authorization.stop();
+        pairing.stop_polling();
+        std::string leave_error;
+        pairing.leave_session(&leave_error);
+        if (!leave_error.empty()) {
+            log::warn("temporary session cleanup: %s", redact_text(leave_error).c_str());
+        }
+        const bool return_to_qr = restart_after_leave && !quit && !exit_after_script_leave &&
+                                  !platform.display->should_close();
+        return return_to_qr ? kRestartPairing : 0;
+    }
+
+    if (exit_after_script_leave) {
+        return 0;
+    }
     if (call_failed) {
         return 2;
     }
@@ -1778,8 +3113,8 @@ int App::run(const AppOptions& options) {
     if (options.voice_loopback) {
         return run_voice_loopback_mode(options);
     }
-    if (options.call && !options.pair) {
-        log::error("--call requires --pair");
+    if (options.call && !options.pair && !options.temporary_session) {
+        log::error("--call requires --pair (or --temporary-session)");
         return 2;
     }
 
@@ -1866,8 +3201,27 @@ int App::run(const AppOptions& options) {
         return run_demo_screen(options, *platform, renderer, ui, media, plugins, passkey,
                                diagnostics, false);
     }
-    return run_session(options, *platform, renderer, ui, media, plugins, passkey, diagnostics,
-                       pairing_options, puck);
+    AppOptions session_options = options;
+    for (;;) {
+        const int result = run_session(session_options, *platform, renderer, ui, media, plugins,
+                                       passkey, diagnostics, pairing_options, puck);
+        if (result != kRestartPairing) {
+            return result;
+        }
+        // Shared-device exit: the previous account and cookie jar are gone.
+        // Start a fresh PairingSession on the same window and show its QR.
+        // --call is a one-shot test hook; the next driver must press Call.
+        session_options.call = false;
+        session_options.pair = true;
+        media.close();
+        plugins.reset_requests(true);
+        passkey = PasskeyFlow{};
+        diagnostics.set_session(false, {});
+        diagnostics.set_call_active(false);
+        diagnostics.clear_call_aec_status();
+        ui.set_call(CallView{});
+        ui.set_pairing_recovery(PairingRecovery::None);
+    }
 }
 
 }  // namespace pk

@@ -37,7 +37,9 @@ struct FileAudioOptions {
 
 // Synthetic capture (a voiced harmonic tone) and a WAV playback sink. An empty
 // path discards that direction, which makes this the null backend for headless
-// voice tests. It needs no sound hardware.
+// voice tests. The platform factory uses it for headless auto, or when
+// --audio file/null is explicit; a real desktop auto request and explicit
+// hardware requests never fall back to it.
 std::unique_ptr<AudioIO> create_file_audio(const FileAudioOptions& options, std::string* error);
 
 struct AlsaAudioOptions {

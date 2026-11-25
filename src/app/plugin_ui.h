@@ -46,6 +46,11 @@ public:
 
     void on_actor_message(const std::string& text);
 
+    // A reconnect replaces the actor's observer state. Drop tracked requests
+    // so only the new snapshot decides what is pending; locally answered or
+    // hidden IDs stay suppressed if a stale snapshot still lists them.
+    void reset_requests(bool forget_answered = false);
+
     // The first pending, not-dismissed request, in arrival order.
     PluginSheet sheet() const;
     bool visible() const { return sheet().kind != PluginSheetKind::None; }
@@ -83,6 +88,7 @@ private:
     std::map<std::string, Request> requests_;
     std::vector<std::string> order_;
     std::set<std::string> hidden_;
+    std::set<std::string> answered_;
     Sender sender_;
     int response_counter_ = 0;
 };

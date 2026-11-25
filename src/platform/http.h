@@ -57,6 +57,10 @@ public:
     // SecureStore and imports it on the next run; it is never logged.
     virtual std::string export_cookies() const { return {}; }
     virtual void import_cookies(const std::string& cookies) { (void)cookies; }
+    // Erases the in-memory jar. import_cookies("") is not a clear: curl treats
+    // an empty line as no-op, so shared-device cleanup needs this explicit
+    // operation.
+    virtual void clear_cookies() {}
 };
 
 // A minimal WebSocket seam. The actor protocol is JSON-RPC over this socket.

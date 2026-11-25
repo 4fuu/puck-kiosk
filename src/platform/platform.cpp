@@ -149,30 +149,44 @@ std::unique_ptr<Platform> create_platform(const PlatformOptions& options, std::s
     }
     platform->websockets = std::make_unique<IxWebSocketFactory>();
 
-#if defined(PUCK_KIOSK_BACKEND_WIN32) && !defined(PUCK_KIOSK_ENABLE_AEC)
-    log::info("AEC: built without webrtc-audio-processing on Windows; echo cancellation is disabled");
-#endif
-
     const bool headless = options.backend == "headless";
+    const bool auto_audio = options.audio_backend == "auto";
+    const bool explicit_file = options.audio_backend == "file";
+    const bool explicit_null = options.audio_backend == "null";
+    // Synthetic/file audio is for tests: headless auto, or an explicit
+    // file/null request. A real desktop auto request and every explicit
+    // hardware request must fail honestly instead of turning into a fake
+    // microphone with a tone.
+    const bool allow_file = explicit_file || explicit_null || (headless && auto_audio);
 #if defined(PUCK_KIOSK_BACKEND_WIN32)
-    const bool wants_wasapi = options.audio_backend == "wasapi" ||
-                              (options.audio_backend == "auto" && !headless);
+    const bool wants_wasapi = options.audio_backend == "wasapi" || (auto_audio && !headless);
     if (wants_wasapi) {
         std::string audio_error;
         platform->audio = create_wasapi_audio(&audio_error);
         if (!platform->audio) {
-            log::warn("%s; falling back to the file/null audio backend", audio_error.c_str());
+            log::error("%s; voice calls are unavailable until WASAPI initializes",
+                       audio_error.c_str());
+        } else {
+            const WasapiEndpointStatus endpoints = probe_wasapi_endpoints();
+            if (!endpoints.available()) {
+                log::warn("wasapi: default endpoint preflight failed (%s); capture/playback "
+                          "will query the default endpoints again when a call starts",
+                          endpoints.error().c_str());
+            } else {
+                log::info("wasapi: default capture and playback endpoints available");
+            }
         }
     }
     if (options.audio_backend == "alsa") {
-        log::warn("--audio alsa is not available on Windows; using the file/null backend");
+        log::error("--audio alsa is not available on Windows; use --audio wasapi or an "
+                   "explicit --audio file/null test backend");
     }
 #else
-    const bool wants_alsa = options.audio_backend == "alsa" ||
-                            (options.audio_backend == "auto" && !headless);
     if (options.audio_backend == "wasapi") {
-        log::warn("--audio wasapi is only available on Windows; using the file/null backend");
+        log::error("--audio wasapi is only available on Windows; use --audio alsa or an "
+                   "explicit --audio file/null test backend");
     }
+    const bool wants_alsa = options.audio_backend == "alsa" || (auto_audio && !headless);
     if (wants_alsa) {
         std::string audio_error;
         AlsaAudioOptions alsa;
@@ -180,11 +194,11 @@ std::unique_ptr<Platform> create_platform(const PlatformOptions& options, std::s
         alsa.playback_device = options.alsa_playback_device;
         platform->audio = create_alsa_audio(alsa, &audio_error);
         if (!platform->audio) {
-            log::warn("%s; falling back to the file/null audio backend", audio_error.c_str());
+            log::error("%s; voice calls are unavailable until ALSA opens", audio_error.c_str());
         }
     }
 #endif
-    if (!platform->audio) {
+    if (!platform->audio && allow_file) {
         FileAudioOptions file;
         file.tone_hz = options.audio_tone_hz;
         file.input_path = options.audio_input_path;
@@ -193,8 +207,12 @@ std::unique_ptr<Platform> create_platform(const PlatformOptions& options, std::s
         std::string audio_error;
         platform->audio = create_file_audio(file, &audio_error);
         if (!platform->audio) {
-            log::warn("audio backend unavailable: %s", audio_error.c_str());
+            log::error("test audio backend unavailable: %s", audio_error.c_str());
         }
+    }
+    if (!platform->audio) {
+        log::error("no usable audio backend; voice calls are unavailable. Use --audio file or "
+                   "--audio null only for deliberate synthetic tests");
     }
     if (platform->audio) {
         log::info("audio backend: %s", platform->audio->name());

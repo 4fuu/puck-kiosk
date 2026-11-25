@@ -60,6 +60,13 @@ bool set_error(std::string* error, const std::string& message) {
     return false;
 }
 
+// Navigation keys share their VK_* values with the X11 keysyms the router
+// accepts, so they can travel as KeyDown without becoming WM_CHAR text.
+bool is_navigation_key(UINT key) {
+    return key == VK_UP || key == VK_DOWN || key == VK_PRIOR || key == VK_NEXT ||
+           key == VK_HOME || key == VK_END;
+}
+
 }  // namespace
 
 struct Win32Display::Impl {
@@ -244,10 +251,11 @@ struct Win32Display::Impl {
         events.push_back(pointer_event(type, client));
     }
 
-    void push_key(InputEvent::Type type, int key) {
+    void push_key(InputEvent::Type type, int key, bool text = false) {
         InputEvent event;
         event.type = type;
         event.key = key;
+        event.text = text;
         events.push_back(event);
     }
 
@@ -551,7 +559,12 @@ struct Win32Display::Impl {
             case WM_SYSKEYDOWN:
                 if (wparam == VK_ESCAPE) {
                     push_key(InputEvent::Type::KeyDown, 27);
+                } else if (is_navigation_key(static_cast<UINT>(wparam))) {
+                    // Up/Down, PageUp/PageDown, Home, and End reach the UI
+                    // router as key codes; they never produce WM_CHAR text.
+                    push_key(InputEvent::Type::KeyDown, static_cast<int>(wparam));
                 } else if (wparam >= VK_F1 && wparam <= VK_F24) {
+                    // F12 remains the Debug reveal key and produces no WM_CHAR.
                     push_key(InputEvent::Type::KeyDown, static_cast<int>(wparam));
                 }
                 return 0;
@@ -560,10 +573,11 @@ struct Win32Display::Impl {
                 push_key(InputEvent::Type::KeyUp, static_cast<int>(wparam));
                 return 0;
             case WM_CHAR:
-                // Printable characters arrive here; Escape and other control
-                // keys are handled by WM_KEYDOWN so they are not delivered twice.
+                // Printable characters arrive here. Escape, navigation, and
+                // function keys are handled by WM_KEYDOWN so text and
+                // navigation are never delivered twice; F12 has no WM_CHAR.
                 if (wparam >= 32 && wparam != 127) {
-                    push_key(InputEvent::Type::KeyDown, static_cast<int>(wparam));
+                    push_key(InputEvent::Type::KeyDown, static_cast<int>(wparam), true);
                 }
                 return 0;
             default:

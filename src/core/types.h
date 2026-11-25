@@ -95,7 +95,21 @@ struct CallView {
     CallPhase phase = CallPhase::Idle;
     std::string caption = "Call Puck";
     std::string detail;
+    // The manual mute button. Dictation pauses the input without changing it.
     bool muted = false;
+    bool dictation_paused = false;
+    // Media is connected; with ready false this is the initial model wait.
+    bool peer_connected = false;
+    // Peer and model are both ready; the ready cue has been played once.
+    bool ready = false;
+    // Actor userSpeaking, extended by the one-second listening hold.
+    bool user_speaking = false;
+    // Combined transmit gate: manual mute, dictation pause, or leaving.
+    bool input_silenced = false;
+    // A hangup is waiting for session.closed before the peer is released.
+    bool closing = false;
+    // The stop receipt, pending start, and media close were all confirmed.
+    bool close_confirmed = false;
     bool speaking = false;
     bool thinking = false;
     float input_level = 0.0f;
@@ -104,7 +118,7 @@ struct CallView {
     int jitter_ms = 0;
 
     bool in_call() const {
-        return phase == CallPhase::Starting || phase == CallPhase::Connecting ||
+        return closing || phase == CallPhase::Starting || phase == CallPhase::Connecting ||
                phase == CallPhase::Active || phase == CallPhase::Speaking ||
                phase == CallPhase::Thinking || phase == CallPhase::Muted;
     }

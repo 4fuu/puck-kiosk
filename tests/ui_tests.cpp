@@ -55,11 +55,15 @@ public:
     void fill_triangle(float, float, float, float, float, float, pk::Color) override {}
     void stroke_circle(float, float, float, float, pk::Color) override {}
     void stroke_line(float, float, float, float, float, pk::Color) override {}
-    void text(float, float, const pk::TextStyle&, const std::string&) override {}
+    void text(float, float, const pk::TextStyle&, const std::string& value) override {
+        texts.push_back(value);
+    }
     float measure_text(const pk::TextStyle& style, const std::string& value) override {
         return static_cast<float>(value.size()) * style.size * 0.5f;
     }
     void fill_path(const std::string&, pk::Rect, pk::Rect, pk::Color) override {}
+
+    std::vector<std::string> texts;
 };
 
 class FakePuck final : public pk::PuckView {
@@ -67,7 +71,13 @@ public:
     const char* name() const override { return "fake"; }
     bool is_3d() const override { return false; }
     bool initialize(std::string*) override { return true; }
-    void draw(pk::Canvas&, pk::Rect, const pk::PuckVisual&, float) override {}
+    void draw(pk::Canvas&, pk::Rect, const pk::PuckVisual& visual, float) override {
+        last_visual = visual;
+        ++draws;
+    }
+
+    pk::PuckVisual last_visual;
+    int draws = 0;
 };
 
 class FakeHttp final : public pk::HttpClient {
@@ -155,6 +165,38 @@ int count_targets(const pk::UiHitMap& hits, pk::UiAction action) {
         }
     }
     return count;
+}
+
+const pk::UiTarget* find_indexed_target(const pk::UiHitMap& hits, pk::UiAction action,
+                                        int index) {
+    for (const pk::UiTarget& target : hits.targets()) {
+        if (target.action == action && target.index == index) {
+            return &target;
+        }
+    }
+    return nullptr;
+}
+
+bool has_text(const FakeCanvas& canvas, const std::string& value) {
+    for (const std::string& text : canvas.texts) {
+        if (text == value) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool has_text_containing(const FakeCanvas& canvas, const std::string& value) {
+    for (const std::string& text : canvas.texts) {
+        if (text.find(value) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool overlaps(pk::Rect a, pk::Rect b) {
+    return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }
 
 void test_hit_map() {
@@ -254,6 +296,7 @@ void test_dispatch() {
     int option = -1;
     int echo = -1;
     int passkey = 0;
+    int pairing_retry = 0;
     int window_minimize = 0;
     int window_maximize = 0;
     int window_close = 0;
@@ -265,6 +308,7 @@ void test_dispatch() {
     handlers.sheet_option = [&](int index) { option = index; };
     handlers.echo_mode = [&](int index) { echo = index; };
     handlers.passkey_confirm = [&]() { ++passkey; };
+    handlers.pairing_retry = [&]() { ++pairing_retry; };
     handlers.window_minimize = [&]() { ++window_minimize; };
     handlers.window_maximize = [&]() { ++window_maximize; };
     handlers.window_close = [&]() { ++window_close; };
@@ -276,12 +320,15 @@ void test_dispatch() {
     CHECK(pk::dispatch_ui_action(pk::UiAction::SheetOption, 2, handlers));
     CHECK(pk::dispatch_ui_action(pk::UiAction::EchoMode, 1, handlers));
     CHECK(pk::dispatch_ui_action(pk::UiAction::PasskeyConfirm, -1, handlers));
+    CHECK(pk::dispatch_ui_action(pk::UiAction::PairingRetry, -1, handlers));
     CHECK(pk::dispatch_ui_action(pk::UiAction::WindowMinimize, -1, handlers));
     CHECK(pk::dispatch_ui_action(pk::UiAction::WindowMaximize, -1, handlers));
     CHECK(pk::dispatch_ui_action(pk::UiAction::WindowClose, -1, handlers));
     CHECK(call == 1 && mute == 1 && end == 1 && media_close == 1);
-    CHECK(option == 2 && echo == 1 && passkey == 1);
+    CHECK(option == 2 && echo == 1 && passkey == 1 && pairing_retry == 1);
     CHECK(window_minimize == 1 && window_maximize == 1 && window_close == 1);
+    CHECK(pk::dispatch_ui_action(pk::UiAction::SheetScrollUp, -1, handlers));
+    CHECK(pk::dispatch_ui_action(pk::UiAction::SheetScrollDown, -1, handlers));
     CHECK(!pk::dispatch_ui_action(pk::UiAction::None, -1, handlers));
     CHECK(!pk::dispatch_ui_action(pk::UiAction::Escape, -1, handlers));
     CHECK(!pk::dispatch_ui_action(pk::UiAction::MicTest, -1, handlers));
@@ -367,9 +414,10 @@ void test_plugin_ui() {
     plugins.phone_ok();
     CHECK(plugins.sheet().kind == pk::PluginSheetKind::None);
 
-    // A later snapshot must not resurrect a locally hidden request.
+    // A later snapshot must not resurrect a locally answered or hidden
+    // request, even when the server's snapshot still says "pending".
     plugins.on_actor_message(plugin_event("plugin.ui.snapshot", {{"requests", requests}}).dump());
-    CHECK(plugins.sheet().kind == pk::PluginSheetKind::Select);  // r1 is pending again
+    CHECK(plugins.sheet().kind == pk::PluginSheetKind::None);
 
     // Settled requests do not show.
     pk::PluginUi settled;
@@ -515,6 +563,24 @@ void test_diagnostics() {
     CHECK(!diagnostics.run_mic_test(&audio, &error));
     CHECK(diagnostics.view().mic_status == "Microphone is busy in a call");
     CHECK(diagnostics.view().mic_busy);
+
+    pk::voice::AecStatus aec_status;
+    aec_status.initialized = true;
+    aec_status.echo_cancellation = true;
+    aec_status.noise_suppression = true;
+    aec_status.backend = "speexdsp";
+    aec_status.detail = "portable backend";
+    diagnostics.set_call_aec_status(true, aec_status);
+    CHECK(diagnostics.view().aec_current_known);
+    CHECK(diagnostics.view().aec_current_active);
+    CHECK(diagnostics.view().aec_current_backend == "speexdsp");
+    CHECK(diagnostics.payload()["echoCancellationCurrent"]["backend"] == "speexdsp");
+    diagnostics.set_call_aec_status(false, aec_status);
+    CHECK(!diagnostics.view().aec_current_active);
+    CHECK(!diagnostics.view().aec_current_in_call);
+    CHECK(diagnostics.view().aec_current_detail == "not in a call");
+    diagnostics.clear_call_aec_status();
+    CHECK(!diagnostics.view().aec_current_known);
 
     FakeHttp usage_http;
     CHECK(pk::post_car_usage(usage_http, "https://ampcode.com", "direct", true, 1280, 720, &error));
@@ -971,6 +1037,634 @@ void test_client_caption() {
     CHECK(std::string(pk::ui_action_name(pk::UiAction::WindowClose)) == "window-close");
 }
 
+const pk::UiTarget* find_visible_option(const pk::UiHitMap& hits, int index,
+                                        pk::Size size) {
+    const pk::UiTarget* target = find_indexed_target(hits, pk::UiAction::SheetOption, index);
+    if (!target || target->rect.y < 0.0f ||
+        target->rect.y + target->rect.h > static_cast<float>(size.height)) {
+        return nullptr;
+    }
+    return target;
+}
+
+void test_text_keys_do_not_navigate() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+    ui.set_call(pk::CallView{});
+    pk::PluginSheet sheet;
+    sheet.kind = pk::PluginSheetKind::Select;
+    sheet.request_id = "text-keys";
+    sheet.title = "Pick a destination";
+    sheet.message = "Choose where Puck should take you next";
+    for (int i = 0; i < 12; ++i) {
+        sheet.options.push_back("Option " + std::to_string(i));
+    }
+    ui.set_sheet(sheet);
+    const pk::Size size{420, 640};
+    ui.draw(canvas, size, 0.0f);
+    CHECK(ui.scroll_sheet(100));
+    ui.draw(canvas, size, 0.1f);
+    CHECK(find_visible_option(ui.hit_map(), 11, size) != nullptr);
+
+    pk::UiInputRouter router;
+    router.set_hit_map(&ui.hit_map());
+    pk::InputEvent text_end;
+    text_end.type = pk::InputEvent::Type::KeyDown;
+    text_end.key = 35;  // '#' and VK_END share this numeric value.
+    text_end.text = true;
+    ui.notify_input(text_end);
+    CHECK(router.handle(text_end) == pk::UiAction::None);
+    ui.draw(canvas, size, 0.2f);
+    CHECK(find_visible_option(ui.hit_map(), 0, size) == nullptr);
+
+    pk::InputEvent text_home;
+    text_home.type = pk::InputEvent::Type::KeyDown;
+    text_home.key = 102;  // 'f' and evdev KEY_HOME share this numeric value.
+    text_home.text = true;
+    ui.notify_input(text_home);
+    router.set_hit_map(&ui.hit_map());
+    CHECK(router.handle(text_home) == pk::UiAction::None);
+    ui.draw(canvas, size, 0.3f);
+    CHECK(find_visible_option(ui.hit_map(), 11, size) != nullptr);
+
+    // Printable '{' shares 123 with F12. Text must not reveal Debug; the
+    // real F12 (text=false) still does.
+    FakePuck debug_puck;
+    FakeCanvas debug_canvas;
+    pk::CarUi debug_ui(debug_puck);
+    debug_ui.set_pairing(pk::QrCode{}, "Call Puck", "Waiting for scan");
+    debug_ui.draw(debug_canvas, pk::Size{1280, 720}, 0.0f);
+    CHECK(find_target(debug_ui.hit_map(), pk::UiAction::DebugOpen) == nullptr);
+
+    pk::InputEvent text_brace;
+    text_brace.type = pk::InputEvent::Type::KeyDown;
+    text_brace.key = 123;
+    text_brace.text = true;
+    debug_ui.notify_input(text_brace);
+    debug_ui.draw(debug_canvas, pk::Size{1280, 720}, 0.1f);
+    CHECK(find_target(debug_ui.hit_map(), pk::UiAction::DebugOpen) == nullptr);
+
+    pk::InputEvent text_x;
+    text_x.type = pk::InputEvent::Type::KeyDown;
+    text_x.key = 88;
+    text_x.text = true;
+    debug_ui.notify_input(text_x);
+    debug_ui.draw(debug_canvas, pk::Size{1280, 720}, 0.2f);
+    CHECK(find_target(debug_ui.hit_map(), pk::UiAction::DebugOpen) == nullptr);
+
+    pk::InputEvent f12;
+    f12.type = pk::InputEvent::Type::KeyDown;
+    f12.key = 123;
+    f12.text = false;
+    debug_ui.notify_input(f12);
+    debug_ui.draw(debug_canvas, pk::Size{1280, 720}, 0.3f);
+    CHECK(find_target(debug_ui.hit_map(), pk::UiAction::DebugOpen) != nullptr);
+}
+
+void test_pairing_retry() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+    ui.set_pairing(pk::QrCode{}, "Confirm on your phone", "", "482 913");
+    ui.set_pairing_recovery(pk::PairingRecovery::Retry);
+    const pk::Size size{420, 640};
+    canvas.texts.clear();
+    ui.draw(canvas, size, 0.0f);
+
+    const pk::UiTarget* retry = find_target(ui.hit_map(), pk::UiAction::PairingRetry);
+    CHECK(retry != nullptr);
+    CHECK(ui.pairing_retry_bounds().w > 0.0f);
+    CHECK(has_text(canvas, "Try Again"));
+    CHECK(!has_text(canvas, "Or Sign In Manually"));
+    if (!retry) {
+        return;
+    }
+    CHECK(retry->rect.x >= 0.0f);
+    CHECK(retry->rect.y >= 0.0f);
+    CHECK(retry->rect.x + retry->rect.w <= static_cast<float>(size.width));
+    CHECK(retry->rect.y + retry->rect.h <= static_cast<float>(size.height));
+    pk::UiFocus retry_focus;
+    retry_focus.set_hit_map(&ui.hit_map());
+    retry_focus.sync();
+    retry_focus.handle(gamepad_button(pk::InputEvent::GamepadButton::A, true), 0.0f);
+    CHECK(retry_focus.focused_action() == pk::UiAction::PairingRetry);
+
+    pk::UiInputRouter router;
+    router.set_hit_map(&ui.hit_map());
+    router.handle(pointer(pk::InputEvent::Type::PointerDown, retry->rect.center_x(),
+                          retry->rect.center_y()));
+    int retries = 0;
+    pk::UiActionHandlers handlers;
+    handlers.pairing_retry = [&]() { ++retries; };
+    const pk::UiAction action = router.handle(
+        pointer(pk::InputEvent::Type::PointerUp, retry->rect.center_x(),
+                retry->rect.center_y()));
+    CHECK(action == pk::UiAction::PairingRetry);
+    CHECK(pk::dispatch_ui_action(action, -1, handlers));
+    CHECK(retries == 1);
+
+    ui.set_pairing_recovery(pk::PairingRecovery::Retrying);
+    canvas.texts.clear();
+    ui.draw(canvas, size, 0.1f);
+    CHECK(find_target(ui.hit_map(), pk::UiAction::PairingRetry) == nullptr);
+    CHECK(ui.pairing_retry_bounds().w > 0.0f);
+    CHECK(has_text_containing(canvas, "Retrying"));
+
+    // A failed attempt keeps the status line and offers the same button.
+    ui.set_pairing(pk::QrCode{}, "Call Puck", "Pairing failed", "");
+    ui.set_pairing_recovery(pk::PairingRecovery::Retry);
+    ui.draw(canvas, size, 0.2f);
+    CHECK(find_target(ui.hit_map(), pk::UiAction::PairingRetry) != nullptr);
+    CHECK(ui.status_bounds().w > 0.0f);
+    const pk::UiTarget* failed_retry =
+        find_target(ui.hit_map(), pk::UiAction::PairingRetry);
+    CHECK(failed_retry && !overlaps(failed_retry->rect, ui.status_bounds()));
+
+    // The short landscape pairing screen shrinks the card instead of
+    // clipping the title, code, status, or recovery button.
+    ui.set_pairing(pk::QrCode{}, "Confirm on your phone", "", "482 913");
+    ui.set_pairing_recovery(pk::PairingRecovery::Retry);
+    const pk::Size short_size{360, 240};
+    ui.draw(canvas, short_size, 0.3f);
+    const pk::UiTarget* short_retry =
+        find_target(ui.hit_map(), pk::UiAction::PairingRetry);
+    CHECK(short_retry != nullptr);
+    if (short_retry) {
+        CHECK(short_retry->rect.y >= 0.0f);
+        CHECK(short_retry->rect.y + short_retry->rect.h <=
+              static_cast<float>(short_size.height));
+        CHECK(short_retry->rect.x + short_retry->rect.w <=
+              static_cast<float>(short_size.width));
+    }
+
+    ui.set_pairing_recovery(pk::PairingRecovery::None);
+    ui.draw(canvas, size, 0.4f);
+    CHECK(find_target(ui.hit_map(), pk::UiAction::PairingRetry) == nullptr);
+    CHECK(ui.pairing_retry_bounds().w == 0.0f);
+}
+
+void test_call_availability() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+    ui.set_call(pk::CallView{});
+    ui.set_call_available(false);
+    const pk::Size size{1280, 720};
+    ui.draw(canvas, size, 0.0f);
+    CHECK(find_target(ui.hit_map(), pk::UiAction::Call) == nullptr);
+    CHECK(!ui.call_available());
+
+    pk::UiFocus focus;
+    focus.set_hit_map(&ui.hit_map());
+    focus.sync();
+    CHECK(!focus.focused());
+    focus.handle(gamepad_button(pk::InputEvent::GamepadButton::A, true), 0.0f);
+    CHECK(focus.focused_action() != pk::UiAction::Call);
+
+    pk::UiInputRouter router;
+    router.set_hit_map(&ui.hit_map());
+    CHECK(router.handle(pointer(pk::InputEvent::Type::PointerDown, 640.0f, 360.0f)) ==
+          pk::UiAction::None);
+    CHECK(router.handle(pointer(pk::InputEvent::Type::PointerUp, 640.0f, 360.0f)) ==
+          pk::UiAction::None);
+
+    // The same view becomes actionable only when the gate opens.
+    ui.set_call_available(true);
+    ui.draw(canvas, size, 0.1f);
+    const pk::UiTarget* call = find_target(ui.hit_map(), pk::UiAction::Call);
+    CHECK(call != nullptr);
+    if (!call) {
+        return;
+    }
+    router.set_hit_map(&ui.hit_map());
+    router.handle(pointer(pk::InputEvent::Type::PointerDown, call->rect.center_x(),
+                          call->rect.center_y()));
+    CHECK(router.handle(pointer(pk::InputEvent::Type::PointerUp, call->rect.center_x(),
+                                call->rect.center_y())) == pk::UiAction::Call);
+}
+
+void test_mic_meter() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+    pk::CallView view;
+    view.phase = pk::CallPhase::Active;
+    view.input_level = 0.05f;
+    ui.set_call(view);
+
+    ui.draw(canvas, pk::Size{1280, 720}, 0.0f);
+    CHECK(ui.mic_level() > 0.9f);
+
+    // A halt falls slowly instead of blinking with the output...
+    view.input_level = 0.0f;
+    ui.set_call(view);
+    ui.draw(canvas, pk::Size{1280, 720}, 0.05f);
+    CHECK(ui.mic_level() > 0.55f);
+    ui.draw(canvas, pk::Size{1280, 720}, 1.2f);
+    CHECK(ui.mic_level() < 0.08f);
+    ui.draw(canvas, pk::Size{1280, 720}, 1.8f);
+    CHECK(ui.mic_level() < 0.02f);
+
+    // ...while a quiet voice still leaves a visible fill.
+    view.input_level = 0.004f;
+    ui.set_call(view);
+    ui.draw(canvas, pk::Size{1280, 720}, 2.0f);
+    CHECK(ui.mic_level() > 0.2f);
+
+    // Muted, connecting, and ended frames snap to zero.
+    view.muted = true;
+    view.phase = pk::CallPhase::Muted;
+    ui.set_call(view);
+    ui.draw(canvas, pk::Size{1280, 720}, 3.0f);
+    CHECK(ui.mic_level() == 0.0f);
+
+    view.muted = false;
+    view.phase = pk::CallPhase::Connecting;
+    ui.set_call(view);
+    ui.draw(canvas, pk::Size{1280, 720}, 4.0f);
+    CHECK(ui.mic_level() == 0.0f);
+
+    view.phase = pk::CallPhase::Ended;
+    view.input_level = 0.05f;
+    ui.set_call(view);
+    ui.draw(canvas, pk::Size{1280, 720}, 5.0f);
+    CHECK(ui.mic_level() == 0.0f);
+}
+
+void test_call_state_text() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+
+    pk::CallView active;
+    active.phase = pk::CallPhase::Active;
+    active.caption = "On a call with Puck";
+    active.detail = "Puck is listening";
+    ui.set_call(active);
+    canvas.texts.clear();
+    ui.draw(canvas, pk::Size{1280, 720}, 0.0f);
+    CHECK(!has_text(canvas, "On a call with Puck"));
+    CHECK(!has_text(canvas, "Puck is listening"));
+
+    pk::CallView speaking = active;
+    speaking.phase = pk::CallPhase::Speaking;
+    speaking.caption = "Puck is speaking";
+    speaking.detail = "I can help with that.";
+    speaking.speaking = true;
+    ui.set_call(speaking);
+    canvas.texts.clear();
+    ui.draw(canvas, pk::Size{1280, 720}, 0.0f);
+    CHECK(!has_text(canvas, "Puck is speaking"));
+    CHECK(!has_text(canvas, "I can help with that."));
+
+    pk::CallView muted = active;
+    muted.phase = pk::CallPhase::Muted;
+    muted.muted = true;
+    muted.caption = "Microphone off";
+    ui.set_call(muted);
+    canvas.texts.clear();
+    ui.draw(canvas, pk::Size{1280, 720}, 0.0f);
+    CHECK(has_text(canvas, "Microphone off"));
+
+    pk::CallView failed = active;
+    failed.phase = pk::CallPhase::Failed;
+    failed.detail = "WebRTC connect timeout";
+    ui.set_call(failed);
+    canvas.texts.clear();
+    ui.draw(canvas, pk::Size{1280, 720}, 0.0f);
+    CHECK(has_text(canvas, "WebRTC connect timeout"));
+}
+
+void test_puck_visual_passthrough() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+
+    pk::PuckVisual visual;
+    visual.listening = true;
+    visual.speaking = false;
+    visual.mouth = 0.0f;
+    ui.set_visual(visual);
+
+    pk::CallView stale;
+    stale.phase = pk::CallPhase::Speaking;
+    stale.speaking = true;
+    stale.thinking = true;
+    stale.mouth = 0.9f;
+    ui.set_call(stale);
+    ui.draw(canvas, pk::Size{1280, 720}, 0.0f);
+    CHECK(!puck.last_visual.speaking);
+    CHECK(puck.last_visual.listening);
+    CHECK(!puck.last_visual.thinking);
+    CHECK(puck.last_visual.mouth == 0.0f);
+
+    visual.speaking = true;
+    visual.listening = false;
+    visual.mouth = 0.6f;
+    ui.set_visual(visual);
+    pk::CallView active;
+    active.phase = pk::CallPhase::Active;
+    ui.set_call(active);
+    ui.draw(canvas, pk::Size{1280, 720}, 0.1f);
+    CHECK(puck.last_visual.speaking);
+    CHECK(!puck.last_visual.listening);
+    CHECK(puck.last_visual.mouth == 0.6f);
+}
+
+void test_long_sheet_scroll() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+    pk::CallView view;
+    view.phase = pk::CallPhase::Active;
+    ui.set_call(view);
+
+    pk::PluginSheet sheet;
+    sheet.kind = pk::PluginSheetKind::Select;
+    sheet.request_id = "long-list";
+    sheet.title = "Pick a destination";
+    sheet.message = "Choose where Puck should take you next";
+    for (int i = 0; i < 12; ++i) {
+        sheet.options.push_back("Option " + std::to_string(i));
+    }
+    sheet.options.back() = "Last option: the quiet overlook";
+    ui.set_sheet(sheet);
+    const pk::Size size{420, 640};
+    ui.draw(canvas, size, 0.0f);
+
+    const pk::Rect up = ui.sheet_scroll_up();
+    const pk::Rect down = ui.sheet_scroll_down();
+    CHECK(up.w > 0.0f && down.w > 0.0f);
+    const pk::UiTarget* dismiss = find_target(ui.hit_map(), pk::UiAction::SheetDismiss);
+    CHECK(dismiss != nullptr);
+    if (!dismiss) {
+        return;
+    }
+
+    for (const pk::UiTarget& target : ui.hit_map().targets()) {
+        if (target.action != pk::UiAction::SheetOption || target.rect.y < 0.0f ||
+            target.rect.y + target.rect.h > static_cast<float>(size.height)) {
+            continue;
+        }
+        CHECK(target.rect.y + target.rect.h <= dismiss->rect.y);
+        CHECK(!overlaps(target.rect, dismiss->rect));
+    }
+
+    // The rail owns its taps; the router must not fire an option behind it.
+    CHECK(ui.hit_map().hit(down.center_x(), down.center_y()) != nullptr);
+    CHECK(ui.hit_map().hit(down.center_x(), down.center_y())->action ==
+          pk::UiAction::SheetScrollDown);
+    pk::UiInputRouter router;
+    router.set_hit_map(&ui.hit_map());
+    router.handle(pointer(pk::InputEvent::Type::PointerDown, down.center_x(),
+                          down.center_y()));
+    CHECK(router.handle(pointer(pk::InputEvent::Type::PointerUp, down.center_x(),
+                                down.center_y())) == pk::UiAction::SheetScrollDown);
+    const pk::UiTarget* first_before = find_visible_option(ui.hit_map(), 0, size);
+    CHECK(first_before != nullptr);
+    const float first_y = first_before ? first_before->rect.y : 0.0f;
+
+    pk::InputEvent tap;
+    tap.type = pk::InputEvent::Type::PointerDown;
+    tap.x = down.center_x();
+    tap.y = down.center_y();
+    ui.notify_input(tap);
+    ui.draw(canvas, size, 0.1f);
+    CHECK(find_visible_option(ui.hit_map(), 0, size) == nullptr);
+    const pk::UiTarget* second = find_visible_option(ui.hit_map(), 1, size);
+    CHECK(second != nullptr);
+    CHECK(second && std::fabs(second->rect.y - first_y) < 0.5f);
+    if (second) {
+        router.set_hit_map(&ui.hit_map());
+        router.handle(pointer(pk::InputEvent::Type::PointerDown, second->rect.center_x(),
+                              second->rect.center_y()));
+        int index = -1;
+        CHECK(router.handle(pointer(pk::InputEvent::Type::PointerUp,
+                                    second->rect.center_x(), second->rect.center_y()),
+                            &index) == pk::UiAction::SheetOption);
+        CHECK(index == 1);
+    }
+
+    // Scrolling to the end keeps the final row and Dismiss reachable.
+    CHECK(ui.scroll_sheet(100));
+    ui.draw(canvas, size, 0.2f);
+    const pk::UiTarget* last = find_visible_option(ui.hit_map(), 11, size);
+    CHECK(last != nullptr);
+    dismiss = find_target(ui.hit_map(), pk::UiAction::SheetDismiss);
+    CHECK(dismiss != nullptr);
+    if (last && dismiss) {
+        CHECK(last->rect.y + last->rect.h <= dismiss->rect.y);
+        CHECK(!overlaps(last->rect, dismiss->rect));
+    }
+    CHECK(ui.sheet_scroll_down().w > 0.0f);  // the rail stays, its down arrow is disabled
+}
+
+void test_long_labels_keep_tail() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+    ui.set_call(pk::CallView{});
+    pk::PluginSheet sheet;
+    sheet.kind = pk::PluginSheetKind::Select;
+    sheet.request_id = "same-prefix";
+    sheet.title = "Pick a destination";
+    sheet.options = {
+        "The riverside park with a long and nearly identical label, EAST",
+        "The riverside park with a long and nearly identical label, WEST",
+    };
+    ui.set_sheet(sheet);
+    ui.draw(canvas, pk::Size{420, 640}, 0.0f);
+    CHECK(has_text_containing(canvas, "EAST"));
+    CHECK(has_text_containing(canvas, "WEST"));
+}
+
+void test_small_window_sheet_separation() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+    pk::CallView view;
+    view.phase = pk::CallPhase::Active;
+    ui.set_call(view);
+    pk::PluginSheet sheet;
+    sheet.kind = pk::PluginSheetKind::Select;
+    sheet.request_id = "small-list";
+    sheet.title = "Pick a destination";
+    for (int i = 0; i < 12; ++i) {
+        sheet.options.push_back("Option " + std::to_string(i));
+    }
+    ui.set_sheet(sheet);
+    const pk::Size size{360, 240};
+    ui.draw(canvas, size, 0.0f);
+
+    const pk::UiTarget* option = find_visible_option(ui.hit_map(), 0, size);
+    const pk::UiTarget* dismiss = find_target(ui.hit_map(), pk::UiAction::SheetDismiss);
+    const pk::UiTarget* end = find_target(ui.hit_map(), pk::UiAction::End);
+    const pk::UiTarget* mute = find_target(ui.hit_map(), pk::UiAction::Mute);
+    const pk::Rect up = ui.sheet_scroll_up();
+    const pk::Rect down = ui.sheet_scroll_down();
+    CHECK(option != nullptr);
+    CHECK(dismiss != nullptr);
+    CHECK(end != nullptr);
+    CHECK(mute != nullptr);
+    CHECK(up.w > 0.0f && up.h > 0.0f);
+    CHECK(down.w > 0.0f && down.h > 0.0f);
+    if (!option || !dismiss || !end || !mute) {
+        return;
+    }
+    CHECK(!overlaps(option->rect, up));
+    CHECK(!overlaps(option->rect, down));
+    CHECK(!overlaps(up, down));
+    CHECK(!overlaps(dismiss->rect, up));
+    CHECK(!overlaps(dismiss->rect, down));
+    CHECK(!overlaps(option->rect, dismiss->rect));
+    CHECK(!overlaps(end->rect, option->rect));
+    CHECK(!overlaps(end->rect, up));
+    CHECK(!overlaps(end->rect, down));
+    CHECK(!overlaps(end->rect, dismiss->rect));
+    CHECK(!overlaps(mute->rect, option->rect));
+    CHECK(!overlaps(mute->rect, dismiss->rect));
+
+    CHECK(ui.hit_map().hit(option->rect.center_x(), option->rect.center_y())->action ==
+          pk::UiAction::SheetOption);
+    CHECK(ui.hit_map().hit(up.center_x(), up.center_y())->action ==
+          pk::UiAction::SheetScrollUp);
+    CHECK(ui.hit_map().hit(down.center_x(), down.center_y())->action ==
+          pk::UiAction::SheetScrollDown);
+    CHECK(ui.hit_map().hit(dismiss->rect.center_x(), dismiss->rect.center_y())->action ==
+          pk::UiAction::SheetDismiss);
+    CHECK(ui.hit_map().hit(end->rect.center_x(), end->rect.center_y())->action ==
+          pk::UiAction::End);
+}
+
+void test_sheet_scroll_action_refreshes_route() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+    ui.set_call(pk::CallView{});
+    pk::PluginSheet sheet;
+    sheet.kind = pk::PluginSheetKind::Select;
+    sheet.request_id = "end-key-list";
+    sheet.title = "Pick a destination";
+    sheet.message = "Choose where Puck should take you next";
+    for (int i = 0; i < 12; ++i) {
+        sheet.options.push_back("Option " + std::to_string(i));
+    }
+    ui.set_sheet(sheet);
+    const pk::Size size{420, 640};
+    ui.draw(canvas, size, 0.0f);
+
+    pk::UiInputRouter router;
+    router.set_hit_map(&ui.hit_map());
+    pk::InputEvent end_key;
+    end_key.type = pk::InputEvent::Type::KeyDown;
+    end_key.key = 35;
+    ui.notify_input(end_key);
+    CHECK(router.handle(end_key) == pk::UiAction::SheetScrollDown);
+    CHECK(find_visible_option(ui.hit_map(), 11, size) == nullptr);
+    pk::UiActionHandlers handlers;
+    CHECK(pk::dispatch_ui_action(pk::UiAction::SheetScrollDown, -1, handlers));
+
+    // The integration's minimal refresh: the next event sees the new map.
+    ui.draw(canvas, size, 0.1f);
+    const pk::UiTarget* last = find_visible_option(ui.hit_map(), 11, size);
+    CHECK(last != nullptr);
+    if (!last) {
+        return;
+    }
+    CHECK(std::fabs(last->rect.center_x() - 186.0f) < 1.0f);
+    CHECK(std::fabs(last->rect.center_y() - 332.0f) < 1.0f);
+    router.set_hit_map(&ui.hit_map());
+    router.handle(pointer(pk::InputEvent::Type::PointerDown, 186.0f, 332.0f));
+    int index = -1;
+    CHECK(router.handle(pointer(pk::InputEvent::Type::PointerUp, 186.0f, 332.0f),
+                        &index) == pk::UiAction::SheetOption);
+    CHECK(index == 11);
+}
+
+void test_long_sheet_focus_reaches_last() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+    ui.set_call(pk::CallView{});
+    pk::PluginSheet sheet;
+    sheet.kind = pk::PluginSheetKind::Select;
+    sheet.request_id = "focus-list";
+    sheet.title = "Pick a destination";
+    for (int i = 0; i < 12; ++i) {
+        sheet.options.push_back("Option " + std::to_string(i));
+    }
+    ui.set_sheet(sheet);
+    const pk::Size size{420, 640};
+    ui.draw(canvas, size, 0.0f);
+
+    pk::UiFocus focus;
+    focus.set_hit_map(&ui.hit_map());
+    focus.sync();
+    float now = 0.1f;
+
+    // The bumpers page the list. After two pages the last four options are
+    // visible, so DPad focus can reach the final one.
+    for (int page = 0; page < 2; ++page) {
+        ui.notify_input(gamepad_button(pk::InputEvent::GamepadButton::RightBumper, true));
+        ui.notify_input(gamepad_button(pk::InputEvent::GamepadButton::RightBumper, false));
+        ui.draw(canvas, size, now);
+        focus.sync();
+        now += 0.05f;
+    }
+    CHECK(find_visible_option(ui.hit_map(), 11, size) != nullptr);
+
+    for (int step = 0; step < 10 && focus.focused_index() != 11; ++step) {
+        focus.handle(gamepad_button(pk::InputEvent::GamepadButton::DPadDown, true), now);
+        focus.handle(gamepad_button(pk::InputEvent::GamepadButton::DPadDown, false),
+                     now + 0.01f);
+        ui.set_focus(focus.view(now + 0.02f, true));
+        ui.draw(canvas, size, now + 0.03f);
+        focus.sync();
+        now += 0.05f;
+    }
+    CHECK(focus.focused_action() == pk::UiAction::SheetOption);
+    CHECK(focus.focused_index() == 11);
+    CHECK(find_visible_option(ui.hit_map(), 11, size) != nullptr);
+}
+
+void test_confirm_and_phone_sheets() {
+    FakePuck puck;
+    FakeCanvas canvas;
+    pk::CarUi ui(puck);
+    ui.set_call(pk::CallView{});
+    const pk::Size size{420, 640};
+
+    pk::PluginSheet confirm;
+    confirm.kind = pk::PluginSheetKind::Confirm;
+    confirm.request_id = "confirm";
+    confirm.title = "Delete the recording?";
+    confirm.confirm_label = "Delete";
+    ui.set_sheet(confirm);
+    ui.draw(canvas, size, 0.0f);
+    CHECK(count_targets(ui.hit_map(), pk::UiAction::SheetOption) == 2);
+    const pk::UiTarget* dismiss = find_target(ui.hit_map(), pk::UiAction::SheetDismiss);
+    CHECK(dismiss != nullptr);
+    for (const pk::UiTarget& target : ui.hit_map().targets()) {
+        if (target.action == pk::UiAction::SheetOption) {
+            CHECK(target.rect.y >= 0.0f);
+            CHECK(target.rect.y + target.rect.h <= static_cast<float>(size.height));
+            CHECK(dismiss && !overlaps(target.rect, dismiss->rect));
+        }
+    }
+    CHECK(ui.sheet_scroll_up().w == 0.0f);
+
+    pk::PluginSheet phone;
+    phone.kind = pk::PluginSheetKind::Phone;
+    phone.request_id = "phone";
+    phone.title = "Approve on your phone";
+    ui.set_sheet(phone);
+    ui.draw(canvas, size, 0.1f);
+    CHECK(find_target(ui.hit_map(), pk::UiAction::SheetOk) != nullptr);
+    CHECK(count_targets(ui.hit_map(), pk::UiAction::SheetOption) == 0);
+    CHECK(find_target(ui.hit_map(), pk::UiAction::SheetDismiss) == nullptr);
+}
+
 void test_gamepad_script() {
     const std::string text = R"([
         {"t": 0.3, "type": "gamepad", "axis": "left_x", "value": 0.75},
@@ -1024,6 +1718,18 @@ int main() {
     test_focus_occlusion();
     test_hint_visibility();
     test_client_caption();
+    test_text_keys_do_not_navigate();
+    test_pairing_retry();
+    test_call_availability();
+    test_mic_meter();
+    test_call_state_text();
+    test_puck_visual_passthrough();
+    test_long_sheet_scroll();
+    test_long_labels_keep_tail();
+    test_small_window_sheet_separation();
+    test_sheet_scroll_action_refreshes_route();
+    test_long_sheet_focus_reaches_last();
+    test_confirm_and_phone_sheets();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -15,6 +15,18 @@ bool is_escape_key(int key) {
     return key == 1 || key == 27;
 }
 
+bool is_scroll_up_key(int key) {
+    return key == 38 || key == 103 ||  // X11 Up, evdev KEY_UP
+           key == 33 || key == 104 ||  // X11 PageUp, evdev KEY_PAGEUP
+           key == 36 || key == 102;    // X11 Home, evdev KEY_HOME
+}
+
+bool is_scroll_down_key(int key) {
+    return key == 40 || key == 108 ||  // X11 Down, evdev KEY_DOWN
+           key == 34 || key == 109 ||  // X11 PageDown, evdev KEY_PAGEDOWN
+           key == 35 || key == 107;    // X11 End, evdev KEY_END
+}
+
 bool parse_event_type(const std::string& type, InputEvent::Type* out) {
     if (type == "down" || type == "pointerdown" || type == "pointer_down") {
         *out = InputEvent::Type::PointerDown;
@@ -109,6 +121,9 @@ const char* ui_action_name(UiAction action) {
         case UiAction::SheetOption: return "sheet-option";
         case UiAction::SheetDismiss: return "sheet-dismiss";
         case UiAction::SheetOk: return "sheet-ok";
+        case UiAction::SheetScrollUp: return "sheet-scroll-up";
+        case UiAction::SheetScrollDown: return "sheet-scroll-down";
+        case UiAction::PairingRetry: return "pairing-retry";
         case UiAction::PasskeyConfirm: return "passkey-confirm";
         case UiAction::DebugOpen: return "debug-open";
         case UiAction::DebugClose: return "debug-close";
@@ -158,9 +173,26 @@ UiAction UiInputRouter::handle(const InputEvent& event, int* index) {
             quit_ = true;
             return UiAction::None;
         case InputEvent::Type::KeyDown:
+            if (event.text) {
+                return UiAction::None;
+            }
             if (is_escape_key(event.key)) {
                 armed_ = false;
                 return UiAction::Escape;
+            }
+            if (map_) {
+                bool has_up = false;
+                bool has_down = false;
+                for (const UiTarget& target : map_->targets()) {
+                    has_up = has_up || target.action == UiAction::SheetScrollUp;
+                    has_down = has_down || target.action == UiAction::SheetScrollDown;
+                }
+                if (has_up && is_scroll_up_key(event.key)) {
+                    return UiAction::SheetScrollUp;
+                }
+                if (has_down && is_scroll_down_key(event.key)) {
+                    return UiAction::SheetScrollDown;
+                }
             }
             return UiAction::None;
         case InputEvent::Type::PointerDown: {
@@ -396,6 +428,18 @@ bool dispatch_ui_action(UiAction action, int index, const UiActionHandlers& hand
         case UiAction::SheetOk:
             if (handlers.sheet_ok) {
                 handlers.sheet_ok();
+                return true;
+            }
+            return false;
+        case UiAction::SheetScrollUp:
+        case UiAction::SheetScrollDown:
+            // CarUi already moved the list when it observed the pointer, key,
+            // or gamepad event. Acknowledging the action makes the existing
+            // input loops repaint before the next event without a handler.
+            return true;
+        case UiAction::PairingRetry:
+            if (handlers.pairing_retry) {
+                handlers.pairing_retry();
                 return true;
             }
             return false;

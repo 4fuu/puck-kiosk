@@ -575,6 +575,39 @@ bool probe_default_endpoint(bool capture, std::string* error) {
 
 }  // namespace
 
+std::string WasapiEndpointStatus::error() const {
+    if (available()) {
+        return {};
+    }
+    std::string message;
+    if (!playback_available) {
+        message = playback_error.empty() ? "playback endpoint unavailable" : playback_error;
+    }
+    if (!capture_available) {
+        const std::string capture = capture_error.empty() ? "capture endpoint unavailable"
+                                                          : capture_error;
+        message += message.empty() ? capture : "; " + capture;
+    }
+    return message;
+}
+
+WasapiEndpointStatus probe_wasapi_endpoints() {
+    WasapiEndpointStatus status;
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool initialized = SUCCEEDED(com);
+    if (FAILED(com) && com != RPC_E_CHANGED_MODE) {
+        status.playback_error = hresult_message("wasapi: COM initialization failed", com);
+        status.capture_error = status.playback_error;
+        return status;
+    }
+    status.playback_available = probe_default_endpoint(false, &status.playback_error);
+    status.capture_available = probe_default_endpoint(true, &status.capture_error);
+    if (initialized) {
+        CoUninitialize();
+    }
+    return status;
+}
+
 std::unique_ptr<AudioIO> create_wasapi_audio(std::string* error) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool initialized = SUCCEEDED(com);
@@ -585,18 +618,14 @@ std::unique_ptr<AudioIO> create_wasapi_audio(std::string* error) {
         return nullptr;
     }
 
-    // Both directions are required for a voice call. Probing here lets the
-    // platform factory fall back to the file/null backend before the call
-    // starts, instead of failing in the middle of one.
-    const bool available = probe_default_endpoint(false, error) &&
-                           probe_default_endpoint(true, error);
+    // Do not probe the endpoints here. A machine that has no default endpoint
+    // at launch must still get a retryable WASAPI backend; start_capture() and
+    // start_playback() query the default endpoints again on every attempt.
+    auto audio = std::make_unique<WasapiAudioIO>();
     if (initialized) {
         CoUninitialize();
     }
-    if (!available) {
-        return nullptr;
-    }
-    return std::make_unique<WasapiAudioIO>();
+    return audio;
 }
 
 }  // namespace pk

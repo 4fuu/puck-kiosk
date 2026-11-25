@@ -32,10 +32,15 @@ void print_help(const char* program) {
               << "  --font <path>           TTF/OTF font used by the 2D canvas\n"
               << "  --no-3d                 Force the 2D Puck renderer\n"
               << "  --pair                  Force a fresh pairing (the default launch restores the saved session)\n"
+              << "  --temporary-session     Shared kiosk mode: never restore an account and return to the QR\n"
+              << "                          after hangup or exit; deletes the temporary car session\n"
               << "  --pair-timeout <s>      Seconds to wait for phone approval (default 600)\n"
+              << "  --pair-retry-after <ms> Test hook: activate Try Again on the confirmation page\n"
+              << "                          after the code has been visible this long\n"
+              << "  --pair-retry-on-paired  Test hook: activate Try Again when Paired is consumed\n"
               << "  --actor-seconds <s>     Observation window after pairing; 0 runs until quit\n"
               << "                          (default 0 for the win32 window, 60 otherwise)\n"
-              << "  --call                  Start a voice call after pairing (requires --pair)\n"
+              << "  --call                  Start a voice call after pairing (requires --pair or --temporary-session)\n"
               << "  --mute-after <s>        Mute the call N seconds after it starts\n"
               << "  --end-after <s>         End the call N seconds after it starts\n"
               << "  --no-aec                Disable echo cancellation\n"
@@ -142,6 +147,10 @@ int main(int argc, char** argv) {
         }
         if (argument == "--pair") {
             options.pair = true;
+            continue;
+        }
+        if (argument == "--temporary-session") {
+            options.temporary_session = true;
             continue;
         }
         if (argument == "--call") {
@@ -318,6 +327,17 @@ int main(int argc, char** argv) {
                 pk::log::error("invalid --pair-timeout");
                 return 2;
             }
+            continue;
+        }
+        if (argument == "--pair-retry-after" && i + 1 < argc) {
+            if (!parse_nonnegative_int(argv[++i], &options.pair_retry_after_ms)) {
+                pk::log::error("invalid --pair-retry-after");
+                return 2;
+            }
+            continue;
+        }
+        if (argument == "--pair-retry-on-paired") {
+            options.pair_retry_on_paired = true;
             continue;
         }
         if (argument == "--actor-seconds" && i + 1 < argc) {

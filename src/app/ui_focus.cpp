@@ -262,6 +262,16 @@ UiFocusResult UiFocus::handle(const InputEvent& event, float now) {
                 case InputEvent::GamepadButton::DPadRight:
                     move(FocusDirection::Right);
                     break;
+                case InputEvent::GamepadButton::LeftBumper:
+                    if (find_target(UiAction::SheetScrollUp, -1) >= 0) {
+                        result.action = UiAction::SheetScrollUp;
+                    }
+                    break;
+                case InputEvent::GamepadButton::RightBumper:
+                    if (find_target(UiAction::SheetScrollDown, -1) >= 0) {
+                        result.action = UiAction::SheetScrollDown;
+                    }
+                    break;
                 default:
                     break;
             }

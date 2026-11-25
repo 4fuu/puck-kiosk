@@ -13,7 +13,18 @@ struct AppOptions {
     std::string font_path;
     bool enable_3d = true;
     bool pair = false;
+    // Shared kiosk mode: do not restore a previous account, and leave the
+    // temporary car session on hangup/exit so the next user starts at the QR.
+    // Personal desktops keep the existing saved-session behavior by default.
+    bool temporary_session = false;
     int pair_timeout_seconds = 600;
+    // Test hook: after the confirmation code has been visible for this many
+    // milliseconds, activate the same Try Again handler the button uses.
+    int pair_retry_after_ms = -1;
+    // Test hook: request Try Again when a Paired snapshot is consumed, before
+    // the app would otherwise establish that account. It locks the
+    // Retry/Paired ordering without injecting pointer events.
+    bool pair_retry_on_paired = false;
     int actor_seconds = 60;
 
     bool call = false;

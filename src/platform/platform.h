@@ -20,7 +20,7 @@ struct PlatformOptions {
     float render_scale = 0.0f;
     bool fullscreen = false;
     std::string output_path;
-    std::string audio_backend = "auto";  // auto | file | null | alsa
+    std::string audio_backend = "auto";  // auto | file | null | alsa | wasapi
     std::string audio_input_path;
     std::string audio_capture_path;
     std::string audio_playback_path;

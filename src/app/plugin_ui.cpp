@@ -22,6 +22,39 @@ const nlohmann::json* object_field(const nlohmann::json& value, const char* key)
     return nullptr;
 }
 
+// The revive/reconnect snapshot nests the request list under plugins.uiRequests.
+// The envelope differs between a client_resume result, an observer snapshot
+// event, and a plugin_message wrapper, so find the list by shape rather than by
+// one fixed wrapper.
+const nlohmann::json* find_ui_requests(const nlohmann::json& value, int depth = 0) {
+    if (depth > 6) {
+        return nullptr;
+    }
+    if (value.is_array()) {
+        for (const nlohmann::json& entry : value) {
+            if (const nlohmann::json* found = find_ui_requests(entry, depth + 1)) {
+                return found;
+            }
+        }
+        return nullptr;
+    }
+    if (!value.is_object()) {
+        return nullptr;
+    }
+    const nlohmann::json* plugins = object_field(value, "plugins");
+    if (plugins && plugins->contains("uiRequests") && (*plugins)["uiRequests"].is_array()) {
+        return &(*plugins)["uiRequests"];
+    }
+    for (const char* key : {"result", "params", "data", "event", "message", "snapshot"}) {
+        if (const nlohmann::json* nested = object_field(value, key)) {
+            if (const nlohmann::json* found = find_ui_requests(*nested, depth + 1)) {
+                return found;
+            }
+        }
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 nlohmann::json PluginUi::response_message(const std::string& request_id, int counter,
@@ -58,6 +91,10 @@ void PluginUi::on_actor_message(const std::string& text) {
 
 void PluginUi::handle_message(const nlohmann::json& message) {
     if (!message.is_object()) {
+        return;
+    }
+    if (const nlohmann::json* requests = find_ui_requests(message)) {
+        apply_snapshot(*requests);
         return;
     }
     const nlohmann::json* payload = &message;
@@ -128,8 +165,21 @@ void PluginUi::apply_snapshot(const nlohmann::json& requests) {
         if (parsed.status.empty()) {
             parsed.status = "pending";
         }
+        // A snapshot from before our response can still list the request as
+        // pending. The ID was answered locally, so never pop it again.
+        parsed.resolved = answered_.count(id) != 0;
         requests_[id] = std::move(parsed);
         order_.push_back(id);
+    }
+    log_sheet();
+}
+
+void PluginUi::reset_requests(bool forget_answered) {
+    requests_.clear();
+    order_.clear();
+    if (forget_answered) {
+        hidden_.clear();
+        answered_.clear();
     }
     log_sheet();
 }
@@ -172,6 +222,7 @@ void PluginUi::remove(const std::string& request_id) {
     requests_.erase(request_id);
     order_.erase(std::remove(order_.begin(), order_.end(), request_id), order_.end());
     hidden_.erase(request_id);
+    answered_.erase(request_id);
     log_sheet();
 }
 
@@ -278,6 +329,7 @@ bool PluginUi::select(int index) {
     const bool sent = respond(*request, &result);
     if (sent) {
         requests_[request->id].resolved = true;
+        answered_.insert(request->id);
         log::info("plugin ui: select %s = %s", request->id.c_str(),
                   result.get<std::string>().c_str());
     }
@@ -293,6 +345,7 @@ bool PluginUi::confirm(bool yes) {
     const bool sent = respond(*request, &result);
     if (sent) {
         requests_[request->id].resolved = true;
+        answered_.insert(request->id);
         log::info("plugin ui: confirm %s = %s", request->id.c_str(), yes ? "yes" : "no");
     }
     return sent;
@@ -309,6 +362,7 @@ bool PluginUi::dismiss() {
         const bool sent = respond(*request, nullptr);
         if (sent) {
             requests_[request->id].resolved = true;
+            answered_.insert(request->id);
             log::info("plugin ui: dismissed select %s", request->id.c_str());
         }
         return sent;

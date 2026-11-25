@@ -46,6 +46,10 @@ struct InputEvent {
     Type type = Type::None;
     float x = 0.0f;
     float y = 0.0f;
+    // KeyDown from a text input (WM_CHAR or an equivalent backend) carries a
+    // printable code point here, not a navigation/F-key. Scripted key events
+    // leave this false so their numeric key codes keep behaving as before.
+    bool text = false;
     int key = 0;
     GamepadButton button = GamepadButton::A;
     GamepadAxis axis = GamepadAxis::LeftX;

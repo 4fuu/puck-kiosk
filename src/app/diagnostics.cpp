@@ -2,6 +2,7 @@
 
 #include "core/log.h"
 #include "platform/audio.h"
+#include "voice/aec.h"
 
 #include <algorithm>
 #include <cmath>
@@ -49,6 +50,73 @@ bool parse_echo_cancellation(const std::string& value, EchoCancellationMode* mod
         return true;
     }
     return false;
+}
+
+EchoCancellationState echo_cancellation_state(EchoCancellationMode mode) {
+    const voice::AecCapabilities capabilities = voice::aec_capabilities();
+    EchoCancellationState state;
+    state.supported = capabilities.built;
+    state.requested = mode != EchoCancellationMode::Off;
+    state.effective = state.supported && state.requested;
+    // Derive the processing flags from the same defaults the engine passes to
+    // EchoCanceller instead of repeating them here.
+    const voice::AecSettings defaults = voice::default_aec_settings();
+    state.noise_suppression = state.effective && defaults.noise_suppression;
+    state.automatic_gain = state.effective && defaults.automatic_gain;
+    state.backend = capabilities.preferred;
+    if (!state.supported) {
+        state.detail = "no AEC backend in this build";
+    } else if (mode == EchoCancellationMode::Off) {
+        state.detail = "off";
+    } else if (mode == EchoCancellationMode::RemoteOnly) {
+        state.detail = "AEC on the remote voice reference only";
+    } else {
+        // The kiosk has no local playback source; saying "all playback" would
+        // imply a second reference path that does not exist.
+        state.detail = "AEC on the available render reference (remote voice here)";
+    }
+    return state;
+}
+
+EchoCancellationMode Diagnostics::echo_mode() const {
+    return echo_cancellation_state(echo_).effective ? EchoCancellationMode::On
+                                                    : EchoCancellationMode::Off;
+}
+
+bool Diagnostics::aec_enabled_for_call() const {
+    return echo_mode() == EchoCancellationMode::On;
+}
+
+EchoCancellationState Diagnostics::echo_state() const {
+    return echo_cancellation_state(echo_);
+}
+
+void Diagnostics::set_call_aec_status(bool in_call, const voice::AecStatus& status) {
+    call_aec_ = AecCallStatus{};
+    call_aec_.known = true;
+    call_aec_.in_call = in_call;
+    call_aec_.active = in_call && status.initialized &&
+                       (status.echo_cancellation || status.noise_suppression ||
+                        status.automatic_gain);
+    call_aec_.echo_cancellation = status.echo_cancellation;
+    call_aec_.noise_suppression = status.noise_suppression;
+    call_aec_.automatic_gain = status.automatic_gain;
+    call_aec_.backend = status.initialized ? status.backend : std::string("none");
+    call_aec_.detail = status.detail;
+    if (!status.initialized) {
+        call_aec_.detail = "not initialized";
+    }
+    if (!in_call) {
+        call_aec_.detail = "not in a call";
+    }
+}
+
+void Diagnostics::clear_call_aec_status() {
+    call_aec_ = AecCallStatus{};
+}
+
+AecCallStatus Diagnostics::call_aec_status() const {
+    return call_aec_;
 }
 
 Diagnostics::Diagnostics(HttpClient* http, std::string origin)
@@ -152,17 +220,51 @@ nlohmann::json Diagnostics::payload() const {
     body["audioContextSampleRate"] =
         audio_available_ ? nlohmann::json(kSampleRate) : nlohmann::json(nullptr);
     body["microphonePermission"] = audio_available_ ? "granted" : "unavailable";
+    const EchoCancellationState next = echo_cancellation_state(echo_);
+    const AecCallStatus current = call_aec_;
+    // Keep the web-compatible field as the requested constraint. The nested
+    // objects separate the next-call configuration from the current call's
+    // actual EchoCanceller status; a request is not proof of what is running.
     body["echoCancellation"] = echo_cancellation_value(echo_);
+    body["echoCancellationSupported"] = next.supported;
+    body["echoCancellationNextCall"] = {
+        {"requested", echo_cancellation_value(echo_)},
+        {"effective", next.effective},
+        {"backend", next.backend},
+        {"detail", next.detail},
+        {"noiseSuppression", next.noise_suppression},
+        {"automaticGain", next.automatic_gain},
+    };
+    if (current.known) {
+        body["echoCancellationCurrent"] = {
+            {"inCall", current.in_call},
+            {"active", current.active},
+            {"backend", current.backend},
+            {"detail", current.detail},
+            {"echoCancellation", current.echo_cancellation},
+            {"noiseSuppression", current.noise_suppression},
+            {"automaticGain", current.automatic_gain},
+        };
+    } else {
+        body["echoCancellationCurrent"] = nullptr;
+    }
+    // Kept at the top level for existing consumers; both describe the next
+    // call, not the current one.
+    body["autoGainControl"] = next.automatic_gain;
+    body["noiseSuppression"] = next.noise_suppression;
     if (mic_.ran) {
+        // run_mic_test() samples the raw capture device: there is no played
+        // reference, so it cannot claim AEC, NS, or AGC processing.
         body["microphone"] = {
             {"result", mic_.ok ? "ok" : (mic_.silent ? "silent" : "error")},
             {"label", mic_.label},
             {"settings",
              {{"sampleRate", kSampleRate},
               {"channelCount", kChannels},
-              {"echoCancellation", echo_ != EchoCancellationMode::Off},
-              {"autoGainControl", true},
-              {"noiseSuppression", true}}},
+              {"echoCancellation", false},
+              {"autoGainControl", false},
+              {"noiseSuppression", false},
+              {"processing", "raw"}}},
             {"peakDBFS", mic_.ok ? nlohmann::json(mic_.peak_dbfs) : nlohmann::json(nullptr)},
         };
     } else {
@@ -224,6 +326,20 @@ DebugView Diagnostics::view() const {
     view.echo = echo_;
     view.can_send = can_send_;
     view.mic_busy = call_active_;
+    const EchoCancellationState next = echo_cancellation_state(echo_);
+    const AecCallStatus current = call_aec_;
+    view.aec_supported = next.supported;
+    view.aec_effective = next.effective;
+    view.aec_noise_suppression = next.noise_suppression;
+    view.aec_automatic_gain = next.automatic_gain;
+    view.aec_backend = next.backend;
+    view.aec_current_known = current.known;
+    view.aec_current_in_call = current.in_call;
+    view.aec_current_active = current.active;
+    view.aec_current_noise_suppression = current.noise_suppression;
+    view.aec_current_automatic_gain = current.automatic_gain;
+    view.aec_current_backend = current.backend;
+    view.aec_current_detail = current.detail;
     if (mic_.ran) {
         if (mic_.ok) {
             view.mic_status = "OK, peak " + number_string(mic_.peak_dbfs, 1) + " dBFS";
@@ -235,9 +351,43 @@ DebugView Diagnostics::view() const {
     }
     view.send_status = send_status_;
 
+    std::string next_call;
+    if (!next.supported) {
+        next_call = "Unavailable in this build";
+    } else if (echo_ == EchoCancellationMode::Off) {
+        next_call = "Off (bypass)";
+    } else {
+        next_call = std::string(echo_ == EchoCancellationMode::RemoteOnly ? "Remote Only: "
+                                                                          : "On: ") +
+                    "AEC, NS " + (next.noise_suppression ? "on" : "off") + ", AGC " +
+                    (next.automatic_gain ? "on" : "off");
+    }
+    std::string current_call;
+    if (!current.known) {
+        current_call = "Not reported (call integration)";
+    } else if (!current.in_call) {
+        current_call = "Not in a call";
+    } else if (current.active) {
+        current_call = std::string("Active: ") + current.backend + ", NS " +
+                       (current.noise_suppression ? "on" : "off") + ", AGC " +
+                       (current.automatic_gain ? "on" : "off");
+    } else {
+        current_call = "Inactive: " + current.detail;
+    }
+    const std::string backend_row =
+        "preferred " + next.backend + " / current " +
+        (current.known ? current.backend : std::string("not reported"));
     view.rows = {
         {"Device", backend_ + " kiosk"},
         {"Firmware", std::string("puck-kiosk ") + kVersion},
+        // Keep the AEC rows at the top: the panel clips long tables and these
+        // are the rows the speakerphone checklist needs first.
+        {"AEC next call", next_call},
+        {"AEC current call", current_call},
+        {"AEC backend", backend_row},
+        {"AEC reference", !next.supported || echo_ == EchoCancellationMode::Off
+                              ? std::string("\u2014")
+                              : "remote voice, 10 ms (same for On and Remote Only)"},
         {"Renderer", "NanoVG / GLES3"},
         {"Chrome", "n/a (native)"},
         {"Auto Code", "n/a"},
@@ -258,8 +408,7 @@ DebugView Diagnostics::view() const {
         view.rows.push_back({"Thread", thread_id_});
     }
     if (mic_.ran && mic_.ok) {
-        view.rows.push_back({"Mic Settings", "sampleRate: 48000, channelCount: 1, echoCancellation: " +
-                                                 std::string(echo_ != EchoCancellationMode::Off ? "true" : "false")});
+        view.rows.push_back({"Mic Settings", "sampleRate: 48000, channelCount: 1, processing: raw"});
     }
     return view;
 }

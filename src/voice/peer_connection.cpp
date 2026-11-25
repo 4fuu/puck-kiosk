@@ -20,7 +20,7 @@ namespace {
 constexpr const char* kDataChannelLabel = "puck-webrtc-voice";
 constexpr std::uint8_t kOpusPayloadType = 111;
 constexpr std::size_t kSendHistoryPackets = 128;
-constexpr auto kGatheringTimeout = std::chrono::seconds(8);
+constexpr auto kGatheringTimeout = std::chrono::seconds(2);
 
 const char* state_name(PeerState state) {
     switch (state) {
@@ -262,15 +262,11 @@ struct VoicePeer::Impl {
         }
     }
 
-    bool wait_for_gathering(std::string* error) {
+    bool wait_for_gathering(const std::shared_ptr<rtc::PeerConnection>& peer,
+                            std::string* error) {
         std::unique_lock<std::mutex> lock(mutex);
-        if (!pc) {
-            if (error) {
-                *error = "peer connection was not created";
-            }
-            return false;
-        }
-        if (pc->gatheringState() == rtc::PeerConnection::GatheringState::Complete) {
+        if (gathering_complete ||
+            peer->gatheringState() == rtc::PeerConnection::GatheringState::Complete) {
             return true;
         }
         if (!gathering_cv.wait_for(lock, kGatheringTimeout, [this] { return gathering_complete; })) {
@@ -345,34 +341,34 @@ bool VoicePeer::create_offer(std::string* sdp, std::string* error) {
     if (!impl_->create_peer(error)) {
         return false;
     }
+    std::shared_ptr<rtc::PeerConnection> peer;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        peer = impl_->pc;
+    }
+    if (!peer) {
+        if (error) {
+            *error = "peer connection was not created";
+        }
+        return false;
+    }
 
     try {
         auto audio = rtc::Description::Audio("audio", rtc::Description::Direction::SendRecv);
         audio.addOpusCodec(kOpusPayloadType);
         audio.addSSRC(impl_->ssrc, "puck-kiosk", "puck-voice", "puck-voice");
-        auto track = impl_->pc->addTrack(audio);
+        auto track = peer->addTrack(audio);
         impl_->setup_track(track);
 
-        auto channel = impl_->pc->createDataChannel(kDataChannelLabel);
+        auto channel = peer->createDataChannel(kDataChannelLabel);
         {
             std::lock_guard<std::mutex> lock(impl_->mutex);
             impl_->data_channel = channel;
         }
         impl_->setup_data_channel(channel);
 
-        impl_->pc->setLocalDescription(rtc::Description::Type::Offer);
-        if (!impl_->wait_for_gathering(error)) {
-            return false;
-        }
-        std::shared_ptr<rtc::PeerConnection> peer;
-        {
-            std::lock_guard<std::mutex> lock(impl_->mutex);
-            peer = impl_->pc;
-        }
-        if (!peer) {
-            if (error) {
-                *error = "peer connection closed while gathering";
-            }
+        peer->setLocalDescription(rtc::Description::Type::Offer);
+        if (!impl_->wait_for_gathering(peer, error)) {
             return false;
         }
         auto description = peer->localDescription();
@@ -413,22 +409,22 @@ bool VoicePeer::accept_offer(const std::string& offer_sdp, std::string* answer_s
     if (!impl_->create_peer(error)) {
         return false;
     }
+    std::shared_ptr<rtc::PeerConnection> peer;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        peer = impl_->pc;
+    }
+    if (!peer) {
+        if (error) {
+            *error = "peer connection was not created";
+        }
+        return false;
+    }
 
     try {
-        impl_->pc->setRemoteDescription(rtc::Description(offer_sdp, "offer"));
-        impl_->pc->setLocalDescription(rtc::Description::Type::Answer);
-        if (!impl_->wait_for_gathering(error)) {
-            return false;
-        }
-        std::shared_ptr<rtc::PeerConnection> peer;
-        {
-            std::lock_guard<std::mutex> lock(impl_->mutex);
-            peer = impl_->pc;
-        }
-        if (!peer) {
-            if (error) {
-                *error = "peer connection closed while gathering";
-            }
+        peer->setRemoteDescription(rtc::Description(offer_sdp, "offer"));
+        peer->setLocalDescription(rtc::Description::Type::Answer);
+        if (!impl_->wait_for_gathering(peer, error)) {
             return false;
         }
         auto description = peer->localDescription();

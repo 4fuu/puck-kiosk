@@ -341,4 +341,13 @@ void CurlHttpClient::import_cookies(const std::string& cookies) {
     }
 }
 
+void CurlHttpClient::clear_cookies() {
+    if (!handle_) {
+        return;
+    }
+    // "ALL" is curl's documented erase-all command. An empty import_cookies
+    // string iterates zero lines and leaves the jar untouched.
+    curl_easy_setopt(handle_, CURLOPT_COOKIELIST, "ALL");
+}
+
 }  // namespace pk

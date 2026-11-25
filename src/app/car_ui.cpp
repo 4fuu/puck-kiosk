@@ -139,9 +139,83 @@ TextStyle fit_font_size(Canvas& canvas, TextStyle style, const std::string& text
     return style;
 }
 
+// Option labels use up to two lines. When the full label still cannot fit,
+// the second line keeps the trailing words behind an ellipsis so options with
+// the same long prefix remain distinguishable.
+std::vector<std::string> fit_option_lines(Canvas& canvas, const TextStyle& style,
+                                          const std::string& text, float max_width) {
+    if (max_width <= 0.0f || canvas.measure_text(style, text) <= max_width) {
+        return {text};
+    }
+    std::vector<std::string> wrapped = wrap_text(canvas, style, text, max_width);
+    bool wrapped_fits = wrapped.size() <= 2;
+    for (const std::string& line : wrapped) {
+        if (canvas.measure_text(style, line) > max_width) {
+            wrapped_fits = false;
+        }
+    }
+    if (wrapped_fits && !wrapped.empty()) {
+        return wrapped;
+    }
+
+    std::string first = wrapped.empty() ? std::string{} : wrapped.front();
+    if (first.empty() || canvas.measure_text(style, first) > max_width) {
+        first = fit_text(canvas, style, text, max_width);
+    }
+    std::size_t rest_start = first.size();
+    while (rest_start < text.size() && text[rest_start] == ' ') {
+        ++rest_start;
+    }
+    const std::string rest = text.substr(rest_start);
+    std::vector<std::string> words;
+    std::size_t word_start = 0;
+    while (word_start < rest.size()) {
+        const std::size_t space = rest.find(' ', word_start);
+        words.push_back(rest.substr(word_start, space == std::string::npos
+                                                   ? std::string::npos
+                                                   : space - word_start));
+        if (space == std::string::npos) {
+            break;
+        }
+        word_start = space + 1;
+    }
+    std::string tail;
+    for (std::size_t i = words.size(); i > 0; --i) {
+        const std::string candidate =
+            tail.empty() ? words[i - 1] : words[i - 1] + " " + tail;
+        if (canvas.measure_text(style, "\u2026 " + candidate) <= max_width) {
+            tail = candidate;
+        } else {
+            break;
+        }
+    }
+    if (!tail.empty()) {
+        return {first, "\u2026 " + tail};
+    }
+    if (!rest.empty()) {
+        return {first, "\u2026 " + fit_text(canvas, style, rest, max_width - style.size)};
+    }
+    return {first};
+}
+
 void text_in_line(Canvas& canvas, float x, float top, float line_height, const TextStyle& style,
                   const std::string& value) {
     canvas.text(x, top + line_height * 0.5f, style, value);
+}
+
+void draw_option_label(Canvas& canvas, Rect button, const TextStyle& style,
+                       const std::string& label) {
+    const std::vector<std::string> lines =
+        fit_option_lines(canvas, style, label, button.w - 24.0f);
+    const float line_height = style.size * 1.14f;
+    if (lines.size() <= 1 || button.h < line_height * 1.7f) {
+        canvas.text(button.center_x(), button.center_y(), style,
+                    fit_text(canvas, style, label, button.w - 24.0f));
+        return;
+    }
+    const float top = button.center_y() - line_height;
+    text_in_line(canvas, button.center_x(), top, line_height, style, lines[0]);
+    text_in_line(canvas, button.center_x(), top + line_height, line_height, style, lines[1]);
 }
 
 float draw_wrapped_center(Canvas& canvas, float center_x, float top, const TextStyle& style,
@@ -157,6 +231,58 @@ float draw_wrapped_center(Canvas& canvas, float center_x, float top, const TextS
 void draw_round_button(Canvas& canvas, float center_x, float center_y, float diameter, Color fill,
                        float opacity) {
     canvas.fill_circle(center_x, center_y, diameter * 0.5f, fade(fill, opacity));
+}
+
+// Fills the lower part of a round button up to `level` as one polygon. The
+// Canvas seam has no clipping path, so the chord outline keeps the fill inside
+// the rim without a mask or per-slice seams.
+void draw_round_level_fill(Canvas& canvas, float center_x, float center_y, float diameter,
+                           float level, Color color, float opacity) {
+    const float clamped = std::min(1.0f, std::max(0.0f, level));
+    if (clamped <= 0.0f || diameter <= 0.0f) {
+        return;
+    }
+    const float top = 100.0f * (1.0f - clamped);
+    constexpr int kSegments = 28;
+    std::string path = "M ";
+    const auto point = [&](float x, float y, bool first) {
+        if (!first) {
+            path += " L ";
+        }
+        path += std::to_string(x);
+        path += ',';
+        path += std::to_string(y);
+    };
+    bool first = true;
+    for (int i = 0; i <= kSegments; ++i) {
+        const float y = top + (100.0f - top) * static_cast<float>(i) /
+                                  static_cast<float>(kSegments);
+        const float dy = y - 50.0f;
+        const float half = std::sqrt(std::max(0.0f, 2500.0f - dy * dy));
+        point(50.0f + half, y, first);
+        first = false;
+    }
+    for (int i = kSegments; i >= 0; --i) {
+        const float y = top + (100.0f - top) * static_cast<float>(i) /
+                                  static_cast<float>(kSegments);
+        const float dy = y - 50.0f;
+        const float half = std::sqrt(std::max(0.0f, 2500.0f - dy * dy));
+        point(50.0f - half, y, false);
+    }
+    path += " Z";
+    const float radius = diameter * 0.5f;
+    canvas.fill_path(path, Rect{0.0f, 0.0f, 100.0f, 100.0f},
+                     Rect{center_x - radius, center_y - radius, diameter, diameter},
+                     fade(color, opacity));
+}
+
+void draw_chevron(Canvas& canvas, float center_x, float center_y, float size, bool down,
+                  Color color) {
+    const float half = size * 0.5f;
+    const float tip = center_y + (down ? half : -half);
+    const float tail = center_y + (down ? -half : half);
+    canvas.stroke_line(center_x - half, tail, center_x, tip, 3.0f, color);
+    canvas.stroke_line(center_x, tip, center_x + half, tail, 3.0f, color);
 }
 
 constexpr Rect kIconBox{0.0f, -960.0f, 960.0f, 960.0f};
@@ -175,7 +301,7 @@ void draw_end_icon(Canvas& canvas, float center_x, float center_y, float size, C
 
 void draw_mute_icon(Canvas& canvas, float center_x, float center_y, float size, Color color,
                     bool muted) {
-    canvas.fill_path(muted ? icons::kMic : icons::kMicOff, kIconBox,
+    canvas.fill_path(muted ? icons::kMicOff : icons::kMic, kIconBox,
                      icon_rect(center_x, center_y, size), color);
 }
 
@@ -222,8 +348,8 @@ void draw_qr_card(Canvas& canvas, Rect card, float radius, const QrCode& qr) {
                 fit_text(canvas, logo_style, "amp", logo_size * 0.88f));
 }
 
-void draw_call_backdrop(Canvas& canvas, Rect stage, Rect puck, float time_seconds, bool speaking) {
-    if (!speaking) {
+void draw_call_backdrop(Canvas& canvas, Rect stage, Rect puck, float time_seconds, float light) {
+    if (light <= 0.002f) {
         return;
     }
     for (int i = 0; i < 56; ++i) {
@@ -231,7 +357,7 @@ void draw_call_backdrop(Canvas& canvas, Rect stage, Rect puck, float time_second
         const float y = stage.y + stage.h * (0.06f + 0.88f * hash01(static_cast<std::uint32_t>(i * 4 + 2)));
         const float phase = hash01(static_cast<std::uint32_t>(i * 4 + 3));
         const float twinkle = 0.5f + 0.5f * std::sin(time_seconds * 1.1f + phase * 6.2831853f);
-        const float alpha = 0.025f + 0.075f * twinkle;
+        const float alpha = (0.025f + 0.075f * twinkle) * light;
         const float radius = 0.6f + 1.0f * hash01(static_cast<std::uint32_t>(i * 4 + 4));
         canvas.fill_circle(x, y, radius, hex(0xdfe8d8, alpha));
     }
@@ -240,7 +366,7 @@ void draw_call_backdrop(Canvas& canvas, Rect stage, Rect puck, float time_second
     for (int i = 10; i >= 1; --i) {
         const float t = static_cast<float>(i) / 10.0f;
         canvas.fill_ellipse(puck.center_x(), foot_y, puck.w * (0.10f + 0.30f * t),
-                            puck.h * (0.010f + 0.045f * t), hex(0xb8c7a2, 0.010f));
+                            puck.h * (0.010f + 0.045f * t), hex(0xb8c7a2, 0.010f * light));
     }
     const float top_y = puck.y + puck.h * 0.06f;
     for (int i = 12; i >= 1; --i) {
@@ -248,7 +374,7 @@ void draw_call_backdrop(Canvas& canvas, Rect stage, Rect puck, float time_second
         canvas.fill_triangle(puck.center_x() - puck.w * (0.03f + 0.10f * t), top_y,
                              puck.center_x() + puck.w * (0.03f + 0.10f * t), top_y,
                              puck.center_x() + puck.w * (0.10f + 0.34f * t), foot_y,
-                             hex(0xb8c7a2, 0.004f));
+                             hex(0xb8c7a2, 0.004f * light));
     }
 }
 
@@ -261,21 +387,24 @@ struct PairingLayout {
     Rect slot;
     Rect card;
     Rect status;
-    Rect signin;
+    Rect retry;
     Rect debug;
     TextStyle title_style;
     TextStyle status_style;
-    TextStyle signin_style;
+    TextStyle retry_style;
     TextStyle code_style;
     float title_line = 60.0f;
     float side_gap = 24.0f;
     float card_radius = 20.0f;
+    float retry_height = 0.0f;
     bool show_status = false;
-    bool show_signin = true;
+    bool show_retry = false;
+    bool show_card = true;
 };
 
 PairingLayout pairing_layout(Canvas& canvas, Size size, const std::string& title,
-                             const std::string& code, const std::string& status) {
+                             const std::string& code, const std::string& status,
+                             bool show_retry, bool show_card) {
     PairingLayout layout;
     const float width = static_cast<float>(size.width);
     const float height = static_cast<float>(size.height);
@@ -293,18 +422,20 @@ PairingLayout pairing_layout(Canvas& canvas, Size size, const std::string& title
         qr = std::min(height * 0.36f, 288.0f);
     }
     qr = std::max(80.0f, qr);
-    const float card = qr + 12.0f;
+    float card = qr + 12.0f;
     layout.card_radius = layout.compact ? 16.0f : 20.0f;
 
     const float title_size =
-        layout.compact ? (layout.portrait ? 36.0f : 28.0f) : 48.0f;
-    layout.title_line = layout.compact ? (layout.portrait ? 40.0f : 32.0f) : 60.0f;
+        layout.compact ? (layout.portrait ? 36.0f : (short_landscape ? 24.0f : 28.0f)) : 48.0f;
+    layout.title_line =
+        layout.compact ? (layout.portrait ? 40.0f : (short_landscape ? 28.0f : 32.0f)) : 60.0f;
     layout.title_style =
         type(title_size, kForeground, TextAlign::Center, FontWeight::Semibold, -0.025f);
-    const float signin_size = layout.compact ? 18.0f : 24.0f;
-    const float signin_pad = layout.compact ? 20.0f : 28.0f;
-    const float signin_height = layout.compact ? 44.0f : 56.0f;
-    layout.signin_style = type(signin_size, kMuted, TextAlign::Center);
+    const float retry_size = layout.compact ? 18.0f : 24.0f;
+    const float retry_pad = layout.compact ? 24.0f : 32.0f;
+    layout.retry_height = layout.compact ? 44.0f : 56.0f;
+    layout.retry_style =
+        type(retry_size, kForeground, TextAlign::Center, FontWeight::Medium);
     const float status_size = layout.compact ? 16.0f : 20.0f;
     const float status_height = layout.compact ? 22.0f : 28.0f;
     layout.status_style = type(status_size, kMuted, TextAlign::Center);
@@ -332,25 +463,45 @@ PairingLayout pairing_layout(Canvas& canvas, Size size, const std::string& title
     pad_left += kSafeLeft;
     const float gap = layout.portrait ? 24.0f : (short_landscape ? 24.0f : 48.0f);
     layout.show_status = code.empty() && !status.empty();
-    layout.show_signin = code.empty() && title != "Connecting";
+    layout.show_retry = show_retry;
+    layout.show_card = show_card;
+    layout.retry_height = layout.show_retry ? layout.retry_height : 0.0f;
 
     float side_width = card;
     if (layout.portrait) {
         const float available = width - pad_left - pad_right;
         const float title_width = canvas.measure_text(layout.title_style, title);
-        const float signin_width =
-            canvas.measure_text(layout.signin_style, "Or Sign In Manually") + signin_pad * 2.0f;
-        side_width = std::min(available, std::max({card, title_width, signin_width}));
+        const float retry_width =
+            canvas.measure_text(layout.retry_style, "Try Again") + retry_pad * 2.0f;
+        side_width = std::min(available, std::max({card, title_width, retry_width}));
         side_width = std::max(side_width, std::min(card, available));
+    } else if (short_landscape && width < 700.0f) {
+        const float max_side =
+            std::max(card, width - pad_left - pad_right - gap - 80.0f);
+        side_width = std::min(max_side, std::max(card, width * 0.42f));
     }
 
     const std::vector<std::string> title_lines =
         wrap_text(canvas, layout.title_style, title, side_width);
     const float title_height =
         static_cast<float>(std::max<std::size_t>(1, title_lines.size())) * layout.title_line;
-    const float side_height = title_height + layout.side_gap + card +
+
+    // A short landscape window cannot stack a QR card, title, status, and
+    // recovery button at the default card size. Give the recovery block its
+    // height first and shrink the card to the remainder.
+    if (short_landscape && layout.show_card) {
+        const float fixed = title_height + layout.side_gap +
+                            (layout.show_status ? layout.side_gap + status_height : 0.0f) +
+                            (layout.show_retry ? layout.side_gap + layout.retry_height : 0.0f);
+        const float available_height = height - pad_top - pad_bottom - 8.0f;
+        const float max_card = std::max(60.0f, available_height - fixed);
+        card = std::min(card, max_card);
+    }
+
+    const float side_height = title_height +
+                              (layout.show_card ? layout.side_gap + card : 0.0f) +
                               (layout.show_status ? layout.side_gap + status_height : 0.0f) +
-                              (layout.show_signin ? layout.side_gap + signin_height : 0.0f);
+                              (layout.show_retry ? layout.side_gap + layout.retry_height : 0.0f);
 
     if (layout.portrait) {
         const float stage_height =
@@ -368,20 +519,24 @@ PairingLayout pairing_layout(Canvas& canvas, Size size, const std::string& title
     }
 
     layout.title = Rect{layout.side.x, layout.side.y, layout.side.w, title_height};
-    layout.slot = Rect{layout.side.x, layout.title.y + layout.title.h + layout.side_gap,
-                       layout.side.w, card};
-    layout.card = Rect{layout.slot.x, layout.slot.y, card, card};
-    if (layout.show_status) {
-        layout.status = Rect{layout.side.x, layout.slot.y + layout.slot.h + layout.side_gap,
-                             layout.side.w, status_height};
+    float content_bottom = layout.title.y + layout.title.h;
+    if (layout.show_card) {
+        layout.slot = Rect{layout.side.x, content_bottom + layout.side_gap, layout.side.w, card};
+        layout.card = Rect{layout.slot.x, layout.slot.y, card, card};
+        content_bottom = layout.slot.y + layout.slot.h;
     }
-    if (layout.show_signin) {
-        const float signin_width =
-            canvas.measure_text(layout.signin_style, "Or Sign In Manually") + signin_pad * 2.0f;
-        const float signin_top = layout.slot.y + layout.slot.h + layout.side_gap +
-                                 (layout.show_status ? status_height + layout.side_gap : 0.0f);
-        layout.signin = Rect{layout.side.center_x() - signin_width * 0.5f, signin_top,
-                             signin_width, signin_height};
+    if (layout.show_status) {
+        layout.status = Rect{layout.side.x, content_bottom + layout.side_gap, layout.side.w,
+                             status_height};
+        content_bottom = layout.status.y + layout.status.h;
+    }
+    if (layout.show_retry) {
+        const float retry_width =
+            std::min(layout.side.w,
+                     canvas.measure_text(layout.retry_style, "Try Again") + retry_pad * 2.0f);
+        layout.retry = Rect{layout.side.center_x() - retry_width * 0.5f,
+                            content_bottom + layout.side_gap, retry_width,
+                            layout.retry_height};
     }
 
     const float debug_height = layout.compact ? 44.0f : 64.0f;
@@ -450,7 +605,9 @@ CallLayout call_layout(Size size) {
                  height - 128.0f - kSafeTop - kSafeBottom};
         layout.overlay = Rect{rail, kSafeTop, width - rail - kSafeRight, height - 88.0f - kSafeBottom};
     } else if (short_landscape) {
-        const float controls_width = 272.0f;
+        // Keep the control rail usable but do not let it swallow a narrow
+        // window: the plugin sheet needs width for its option and scroll rail.
+        const float controls_width = std::clamp(width * 0.36f, 120.0f, 272.0f);
         layout.header = Rect{0.0f, 0.0f, width, layout.header_height};
         layout.main = Rect{0.0f, layout.header_height, width - controls_width,
                            height - layout.header_height};
@@ -515,6 +672,12 @@ CallLayout call_layout(Size size) {
 }
 
 std::string call_caption(const CallView& call) {
+    if (call.closing) {
+        return "Ending call";
+    }
+    if (call.dictation_paused && !call.muted) {
+        return "Microphone paused";
+    }
     switch (call.phase) {
         case CallPhase::Starting:
         case CallPhase::Connecting:
@@ -525,13 +688,14 @@ std::string call_caption(const CallView& call) {
             return "Call Ended";
         case CallPhase::Failed:
             return call.detail.empty() ? "Call failed" : call.detail;
+        case CallPhase::Muted:
+            return call.caption.empty() ? "Microphone off" : call.caption;
         case CallPhase::Idle:
-            return {};
         case CallPhase::Active:
         case CallPhase::Speaking:
-        case CallPhase::Muted:
-            // Live transcript captions and state text ("Microphone off").
-            return call.caption;
+            // The normal listening and speaking states stay wordless: only
+            // connection, pause, ended, and failure get a state line.
+            return {};
     }
     return {};
 }
@@ -612,7 +776,8 @@ void draw_confirm_button(Canvas& canvas, const CallLayout& layout, const Passkey
 }
 
 void draw_call_controls(Canvas& canvas, const CallLayout& layout, const CallView& call,
-                        const PasskeyView& passkey, float split, UiHitMap& hits) {
+                        const PasskeyView& passkey, float split, float mic_level,
+                        bool call_available, UiHitMap& hits) {
     // The web keeps the call object (and its End/Mute controls) after a failed
     // call; only ending it returns to the green call button.
     const bool in_call = call.in_call() || call.phase == CallPhase::Failed;
@@ -624,7 +789,7 @@ void draw_call_controls(Canvas& canvas, const CallLayout& layout, const CallView
     if (!in_call) {
         const float center_x = layout.control_center_x + layout.split_x * split;
         const float center_y = layout.control_center_y + layout.split_y * split;
-        const bool can_call = passkey.mode != PasskeyMode::Phone;
+        const bool can_call = call_available && passkey.mode != PasskeyMode::Phone;
         const float opacity = can_call ? 1.0f : 0.4f;
         draw_round_button(canvas, center_x, center_y, layout.button_size, kStart, opacity);
         draw_call_icon(canvas, center_x, center_y, layout.icon_size, fade(kWhite, opacity));
@@ -656,6 +821,10 @@ void draw_call_controls(Canvas& canvas, const CallLayout& layout, const CallView
     const Color fill = call.muted ? kForeground : kSecondary;
     const Color icon = call.muted ? kBackground : kForeground;
     draw_round_button(canvas, mute_x, mute_y, layout.button_size * scale, fill, opacity);
+    if (!call.muted && !disabled && mic_level > 0.0f) {
+        draw_round_level_fill(canvas, mute_x, mute_y, layout.button_size * scale, mic_level,
+                              kSuccess, opacity * 0.55f);
+    }
     draw_mute_icon(canvas, mute_x, mute_y, layout.icon_size * scale, fade(icon, opacity),
                    call.muted);
     if (!disabled) {
@@ -686,6 +855,9 @@ std::string focus_hint_label(UiAction action, bool holding, bool muted) {
         case UiAction::SheetOption: return "Select";
         case UiAction::SheetDismiss: return "Dismiss";
         case UiAction::SheetOk: return "OK";
+        case UiAction::SheetScrollUp: return "Scroll up";
+        case UiAction::SheetScrollDown: return "Scroll down";
+        case UiAction::PairingRetry: return "Try again";
         case UiAction::PasskeyConfirm: return "Confirm";
         case UiAction::DebugOpen: return "Open";
         case UiAction::DebugClose: return "Close";
@@ -748,16 +920,89 @@ void CarUi::add_target(Rect rect, UiAction action, int index) {
 void CarUi::notify_input(const InputEvent& event) {
     if (is_gamepad_event(event)) {
         hints_visible_ = true;
+        if (event.type == InputEvent::Type::GamepadButtonDown) {
+            if (event.button == InputEvent::GamepadButton::A && focus_.focused) {
+                if (focus_.action == UiAction::SheetScrollUp) {
+                    scroll_sheet(-1);
+                    return;
+                }
+                if (focus_.action == UiAction::SheetScrollDown) {
+                    scroll_sheet(1);
+                    return;
+                }
+            }
+            if (sheet_scroll_max_ > 0) {
+                if (event.button == InputEvent::GamepadButton::LeftBumper) {
+                    scroll_sheet(-std::max(1, sheet_scroll_capacity_));
+                } else if (event.button == InputEvent::GamepadButton::RightBumper) {
+                    scroll_sheet(std::max(1, sheet_scroll_capacity_));
+                }
+            }
+        }
         return;
     }
-    if (event.type == InputEvent::Type::KeyDown && (event.key == 123 || event.key == 88)) {
-        debug_revealed_ = !debug_revealed_;
-        return;
+    if (event.type == InputEvent::Type::KeyDown && !event.text) {
+        if (sheet_scroll_max_ > 0) {
+            // X11 and evdev key codes are both accepted, like Escape above.
+            const int page = std::max(1, sheet_scroll_capacity_);
+            switch (event.key) {
+                case 38:   // X11 Up
+                case 103:  // evdev KEY_UP
+                    if (scroll_sheet(-1)) {
+                        return;
+                    }
+                    break;
+                case 40:   // X11 Down
+                case 108:  // evdev KEY_DOWN
+                    if (scroll_sheet(1)) {
+                        return;
+                    }
+                    break;
+                case 33:   // X11 PageUp
+                case 104:  // evdev KEY_PAGEUP
+                    if (scroll_sheet(-page)) {
+                        return;
+                    }
+                    break;
+                case 34:   // X11 PageDown
+                case 109:  // evdev KEY_PAGEDOWN
+                    if (scroll_sheet(page)) {
+                        return;
+                    }
+                    break;
+                case 36:   // X11 Home
+                case 102:  // evdev KEY_HOME
+                    if (scroll_sheet(-sheet_scroll_row_)) {
+                        return;
+                    }
+                    break;
+                case 35:   // X11 End
+                case 107:  // evdev KEY_END
+                    if (scroll_sheet(sheet_scroll_max_ - sheet_scroll_row_)) {
+                        return;
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+        if (event.key == 123 || event.key == 88) {
+            debug_revealed_ = !debug_revealed_;
+            return;
+        }
     }
     if (event.type == InputEvent::Type::PointerDown ||
         event.type == InputEvent::Type::PointerMove ||
         event.type == InputEvent::Type::PointerUp) {
         hints_visible_ = false;
+        if (event.type == InputEvent::Type::PointerDown && sheet_scroll_max_ > 0) {
+            if (rect_contains(sheet_scroll_up_, event.x, event.y) && scroll_sheet(-1)) {
+                return;
+            }
+            if (rect_contains(sheet_scroll_down_, event.x, event.y) && scroll_sheet(1)) {
+                return;
+            }
+        }
         const float corner = 96.0f;
         const bool in_corner = event.x < corner &&
                                event.y > static_cast<float>(last_size_.height) - corner;
@@ -934,6 +1179,77 @@ void CarUi::set_call(const CallView& view) {
     call_ = view;
 }
 
+void CarUi::set_sheet(const PluginSheet& sheet) {
+    if (sheet.request_id != sheet_.request_id || sheet.kind != sheet_.kind ||
+        sheet.options.size() != sheet_.options.size()) {
+        sheet_scroll_row_ = 0;
+        sheet_scroll_max_ = 0;
+        sheet_scroll_capacity_ = 0;
+        sheet_scroll_up_ = {};
+        sheet_scroll_down_ = {};
+    }
+    sheet_ = sheet;
+}
+
+bool CarUi::scroll_sheet(int rows) {
+    if ((sheet_.kind != PluginSheetKind::Select && sheet_.kind != PluginSheetKind::Confirm) ||
+        rows == 0) {
+        return false;
+    }
+    const int next = std::clamp(sheet_scroll_row_ + rows, 0, sheet_scroll_max_);
+    if (next == sheet_scroll_row_) {
+        return false;
+    }
+    sheet_scroll_row_ = next;
+    return true;
+}
+
+float CarUi::update_mic_level(const CallView& call, float time_seconds) {
+    const bool connected = call.phase == CallPhase::Active ||
+                           call.phase == CallPhase::Speaking ||
+                           call.phase == CallPhase::Thinking;
+    if (!connected || call.muted || call.input_silenced || call.dictation_paused ||
+        call.closing) {
+        mic_level_ = 0.0f;
+        mic_peak_ = 0.0f;
+        mic_last_time_ = time_seconds;
+        return mic_level_;
+    }
+
+    const float raw = clamp01(call.input_level);
+    const bool first = mic_last_time_ < 0.0f || time_seconds + 0.001f < mic_last_time_;
+    const float dt = first ? 0.0f : std::clamp(time_seconds - mic_last_time_, 0.0f, 1.0f);
+    mic_last_time_ = time_seconds;
+
+    // Peak normalization follows the web's input meter: quiet speech keeps a
+    // usable fill, while the floor keeps room noise from pegging the button.
+    const float decayed_peak = mic_peak_ * std::exp(-dt / 6.0f);
+    mic_peak_ = std::max({raw, decayed_peak, 0.02f});
+    const float normalized = std::pow(clamp01(raw / mic_peak_), 0.65f);
+
+    if (first) {
+        mic_level_ = normalized;
+    } else {
+        const float rate = normalized > mic_level_ ? 22.0f : 2.6f;
+        mic_level_ += (normalized - mic_level_) * (1.0f - std::exp(-dt * rate));
+    }
+    mic_level_ = clamp01(mic_level_);
+    return mic_level_;
+}
+
+float CarUi::advance_stage_light(bool speaking, float time_seconds) {
+    const float target = speaking ? 1.0f : 0.0f;
+    if (stage_light_time_ < 0.0f || time_seconds + 0.001f < stage_light_time_) {
+        stage_light_ = target;
+    } else {
+        const float dt = std::clamp(time_seconds - stage_light_time_, 0.0f, 0.1f);
+        const float rate = speaking ? 14.0f : 2.4f;
+        stage_light_ += (target - stage_light_) * (1.0f - std::exp(-dt * rate));
+    }
+    stage_light_time_ = time_seconds;
+    return stage_light_;
+}
+
 float CarUi::control_split(float time_seconds, bool in_call) {
     const float target = in_call ? 1.0f : 0.0f;
     if (control_split_ < 0.0f || time_seconds + 0.001f < last_draw_time_) {
@@ -974,6 +1290,7 @@ void CarUi::draw(Canvas& canvas, Size size, float time_seconds) {
     puck_bounds_ = {};
     puck_stage_ = {};
     status_bounds_ = {};
+    pairing_retry_bounds_ = {};
     if (caption_height > 0) {
         canvas.save();
         canvas.translate(0.0f, static_cast<float>(caption_height));
@@ -1028,7 +1345,14 @@ void CarUi::draw_client_caption(Canvas& canvas, Size size) {
 }
 
 void CarUi::draw_pairing(Canvas& canvas, Size size, float time_seconds) {
-    const PairingLayout layout = pairing_layout(canvas, size, title_, code_, status_);
+    // A terminal failure with neither a QR nor a confirmation code must not
+    // show the white "QR" placeholder: it would look scannable. The waiting
+    // screen keeps the placeholder until the first code arrives.
+    const bool terminal_without_card =
+        code_.empty() && qr_.empty() && pairing_recovery_ != PairingRecovery::None;
+    const PairingLayout layout =
+        pairing_layout(canvas, size, title_, code_, status_,
+                       pairing_recovery_ != PairingRecovery::None, !terminal_without_card);
 
     const float puck_size = std::min(layout.stage.w, layout.stage.h);
     const float puck_y = layout.portrait ? layout.stage.y + layout.stage.h - puck_size
@@ -1044,12 +1368,14 @@ void CarUi::draw_pairing(Canvas& canvas, Size size, float time_seconds) {
                             layout.title_line, title_, layout.title.w);
     }
 
-    if (code_.empty()) {
-        draw_qr_card(canvas, layout.card, layout.card_radius, qr_);
-    } else {
-        TextStyle code_style =
-            fit_font_size(canvas, layout.code_style, code_, layout.slot.w - 16.0f, 28.0f);
-        canvas.text(layout.slot.center_x(), layout.slot.center_y(), code_style, code_);
+    if (layout.show_card) {
+        if (code_.empty()) {
+            draw_qr_card(canvas, layout.card, layout.card_radius, qr_);
+        } else {
+            TextStyle code_style =
+                fit_font_size(canvas, layout.code_style, code_, layout.slot.w - 16.0f, 28.0f);
+            canvas.text(layout.slot.center_x(), layout.slot.center_y(), code_style, code_);
+        }
     }
 
     if (layout.show_status) {
@@ -1059,9 +1385,20 @@ void CarUi::draw_pairing(Canvas& canvas, Size size, float time_seconds) {
                     fit_text(canvas, status_style, status_, layout.status.w));
     }
 
-    if (layout.show_signin) {
-        canvas.text(layout.signin.center_x(), layout.signin.center_y(), layout.signin_style,
-                    "Or Sign In Manually");
+    if (layout.show_retry) {
+        pairing_retry_bounds_ = layout.retry;
+        const bool retrying = pairing_recovery_ == PairingRecovery::Retrying;
+        canvas.fill_rounded_rect(layout.retry, layout.retry.h * 0.5f,
+                                 retrying ? hex(0x1a211a) : kSecondary);
+        const TextStyle retry_style =
+            retrying ? type(layout.retry_style.size, kMuted, TextAlign::Center,
+                            FontWeight::Medium)
+                     : layout.retry_style;
+        canvas.text(layout.retry.center_x(), layout.retry.center_y(), retry_style,
+                    retrying ? "Retrying\u2026" : "Try Again");
+        if (!retrying) {
+            add_target(layout.retry, UiAction::PairingRetry);
+        }
     }
 
     add_debug_target(canvas, size, true);
@@ -1071,6 +1408,8 @@ void CarUi::draw_call(Canvas& canvas, Size size, float time_seconds) {
     const CallLayout layout = call_layout(size);
     const bool in_call = call_.in_call() || call_.phase == CallPhase::Failed;
     const float split = control_split(time_seconds, in_call);
+    mic_level_ = update_mic_level(call_, time_seconds);
+    const float stage_light = advance_stage_light(visual_.speaking, time_seconds);
 
     draw_call_header(canvas, layout, size);
 
@@ -1078,19 +1417,15 @@ void CarUi::draw_call(Canvas& canvas, Size size, float time_seconds) {
         draw_passkey(canvas, layout.main_content, layout.compact);
     } else {
         if (!puck_->is_3d()) {
-            draw_call_backdrop(canvas, layout.main, layout.puck, time_seconds,
-                               call_.speaking || call_.output_level > 0.02f);
+            draw_call_backdrop(canvas, layout.main, layout.puck, time_seconds, stage_light);
         }
-        PuckVisual visual = visual_;
-        visual.speaking = call_.speaking;
-        visual.listening = call_.phase == CallPhase::Active && !call_.muted;
-        visual.thinking = call_.thinking;
-        visual.not_listening = call_.muted;
-        visual.mouth = call_.mouth;
+        // The actor's aligned PuckVisual is the only source of the stage:
+        // CallView supplies copy and local input, not a second opinion about
+        // speaking, listening, thinking, or mouth.
         puck_bounds_ = layout.puck;
         puck_stage_ = layout.main;
         puck_->set_stage(puck_stage_);
-        puck_->draw(canvas, layout.puck, visual, time_seconds);
+        puck_->draw(canvas, layout.puck, visual_, time_seconds);
         draw_call_caption(canvas, layout, call_);
     }
 
@@ -1110,7 +1445,8 @@ void CarUi::draw_call(Canvas& canvas, Size size, float time_seconds) {
         draw_sheet(canvas, layout.overlay, layout.compact);
     }
 
-    draw_call_controls(canvas, layout, call_, passkey_, split, hits_);
+    draw_call_controls(canvas, layout, call_, passkey_, split, mic_level_, call_available_,
+                       hits_);
     add_debug_target(canvas, size, false);
 }
 
@@ -1249,7 +1585,7 @@ void CarUi::draw_sheet(Canvas& canvas, Rect area, bool compact) {
     const bool confirm = sheet_.kind == PluginSheetKind::Confirm;
     const std::size_t count = confirm ? 2 : sheet_.options.size();
     const bool dense = count > 4;
-    const float option_height =
+    const float preferred_option_height =
         compact ? (dense ? 48.0f : 64.0f) : (dense ? 64.0f : 96.0f);
     const float option_gap = dense ? 12.0f : 20.0f;
     const int columns = 2;
@@ -1267,70 +1603,157 @@ void CarUi::draw_sheet(Canvas& canvas, Rect area, bool compact) {
         compact ? (dense ? 18.0f : 20.0f) : (dense ? 24.0f : 30.0f), kForeground,
         TextAlign::Center, FontWeight::Medium);
 
-    const bool has_eyebrow = !sheet_.message.empty();
-    const std::string eyebrow = has_eyebrow ? sheet_.title : std::string{};
-    const std::string heading = has_eyebrow ? sheet_.message : sheet_.title;
-    const std::vector<std::string> headings =
-        wrap_text(canvas, title_style, heading, content_width);
-    const float header_height =
+    bool has_eyebrow = !sheet_.message.empty();
+    std::string eyebrow = has_eyebrow ? sheet_.title : std::string{};
+    std::string heading = has_eyebrow ? sheet_.message : sheet_.title;
+    std::vector<std::string> headings = wrap_text(canvas, title_style, heading, content_width);
+    float header_height =
         (has_eyebrow ? eyebrow_line + 12.0f : 0.0f) +
         static_cast<float>(std::max<std::size_t>(1, headings.size())) * title_line;
-    const float grid_height = rows > 0 ? rows * option_height + (rows - 1) * option_gap : 0.0f;
-    const float total = header_height + gap + grid_height + gap + dismiss_height;
-    float y = std::max(area.y + 8.0f, area.center_y() - total * 0.5f);
 
-    if (has_eyebrow) {
-        text_in_line(canvas, area.center_x(), y, eyebrow_line, eyebrow_style,
-                     fit_text(canvas, eyebrow_style, eyebrow, content_width));
-        y += eyebrow_line + 12.0f;
-    }
-    for (const std::string& line : headings) {
-        text_in_line(canvas, area.center_x(), y, title_line, title_style, line);
-        y += title_line;
-    }
-    y += gap;
-
-    const float button_width = (content_width - option_gap * (columns - 1)) / columns;
-    float grid_bottom = y + grid_height;
-    const float dismiss_limit = area.y + area.h - 8.0f - dismiss_height;
-    if (grid_bottom + gap + dismiss_height > area.y + area.h - 8.0f && rows > 0) {
-        const float available = dismiss_limit - gap - y;
-        const float compressed =
-            std::max(44.0f, (available - (rows - 1) * option_gap) / static_cast<float>(rows));
-        grid_bottom = y + rows * compressed + (rows - 1) * option_gap;
-        for (std::size_t i = 0; i < count; ++i) {
-            const int column = static_cast<int>(i) % columns;
-            const int row = static_cast<int>(i) / columns;
-            const Rect button{left + static_cast<float>(column) * (button_width + option_gap),
-                              y + static_cast<float>(row) * (compressed + option_gap),
-                              button_width, compressed};
-            const std::string label = confirm ? (i == 0 ? sheet_.confirm_label : "No")
-                                              : sheet_.options[i];
-            canvas.fill_rounded_rect(button, 16.0f, kSecondary);
-            canvas.text(button.center_x(), button.center_y(), option_style,
-                        fit_text(canvas, option_style, label, button.w - 24.0f));
-            add_target(button, UiAction::SheetOption, static_cast<int>(i));
+    auto draw_header = [&](float top) {
+        float y = top;
+        if (has_eyebrow) {
+            text_in_line(canvas, area.center_x(), y, eyebrow_line, eyebrow_style,
+                         fit_text(canvas, eyebrow_style, eyebrow, content_width));
+            y += eyebrow_line + 12.0f;
         }
-    } else {
-        for (std::size_t i = 0; i < count; ++i) {
-            const int column = static_cast<int>(i) % columns;
-            const int row = static_cast<int>(i) / columns;
-            const Rect button{left + static_cast<float>(column) * (button_width + option_gap),
-                              y + static_cast<float>(row) * (option_height + option_gap),
-                              button_width, option_height};
-            const std::string label = confirm ? (i == 0 ? sheet_.confirm_label : "No")
-                                              : sheet_.options[i];
-            canvas.fill_rounded_rect(button, 16.0f, kSecondary);
-            canvas.text(button.center_x(), button.center_y(), option_style,
-                        fit_text(canvas, option_style, label, button.w - 24.0f));
-            add_target(button, UiAction::SheetOption, static_cast<int>(i));
+        for (const std::string& line : headings) {
+            text_in_line(canvas, area.center_x(), y, title_line, title_style, line);
+            y += title_line;
         }
-    }
+    };
 
     const TextStyle dismiss_style = type(dismiss_size, kMuted, TextAlign::Center);
     const float dismiss_width =
         std::min(content_width, canvas.measure_text(dismiss_style, "Dismiss") + 80.0f);
-    const float dismiss_top = std::min(grid_bottom + gap, dismiss_limit);
+    const float dismiss_bottom = area.y + area.h - 8.0f;
+
+    // Two columns when the whole set fits. A long list switches to one
+    // scrolling column instead of compressing rows until they collide.
+    const float grid_height =
+        rows > 0 ? rows * preferred_option_height + (rows - 1) * option_gap : 0.0f;
+    const float grid_total = header_height + gap + grid_height + gap + dismiss_height;
+    if (grid_total <= area.h - 16.0f) {
+        float top = area.y + (area.h - grid_total) * 0.5f;
+        draw_header(top);
+        const float y = top + header_height + gap;
+        const float button_width = (content_width - option_gap * (columns - 1)) / columns;
+        for (std::size_t i = 0; i < count; ++i) {
+            const int column = static_cast<int>(i) % columns;
+            const int row = static_cast<int>(i) / columns;
+            const Rect button{left + static_cast<float>(column) * (button_width + option_gap),
+                              y + static_cast<float>(row) * (preferred_option_height + option_gap),
+                              button_width, preferred_option_height};
+            const std::string label = confirm ? (i == 0 ? sheet_.confirm_label : "No")
+                                              : sheet_.options[i];
+            canvas.fill_rounded_rect(button, 16.0f, kSecondary);
+            draw_option_label(canvas, button, option_style, label);
+            add_target(button, UiAction::SheetOption, static_cast<int>(i));
+        }
+        const Rect dismiss{area.center_x() - dismiss_width * 0.5f, y + grid_height + gap,
+                           dismiss_width, dismiss_height};
+        canvas.text(dismiss.center_x(), dismiss.center_y(), dismiss_style, "Dismiss");
+        add_target(dismiss, UiAction::SheetDismiss);
+        sheet_scroll_row_ = 0;
+        sheet_scroll_max_ = 0;
+        sheet_scroll_capacity_ = 0;
+        sheet_scroll_up_ = {};
+        sheet_scroll_down_ = {};
+        return;
+    }
+
+    // Scroll mode pins the header to the top and Dismiss to the bottom, so the
+    // list owns the remaining height and the final option stays reachable.
+    float row_height = compact ? 48.0f : 64.0f;
+    const float row_gap = 12.0f;
+    const float dismiss_top = dismiss_bottom - dismiss_height;
+    float header_top = area.y + 8.0f;
+    float list_top = header_top + header_height + gap;
+    float list_bottom = dismiss_top - gap;
+    if (list_bottom - list_top < row_height) {
+        // A very short window gives the list priority over the eyebrow and
+        // extra heading lines; Dismiss and one option row remain visible.
+        has_eyebrow = false;
+        if (headings.size() > 1) {
+            headings.resize(1);
+        }
+        header_height = headings.empty() ? 0.0f : title_line;
+        list_top = header_top + header_height + gap;
+    }
+    if (list_bottom - list_top < row_height) {
+        list_top = header_top + header_height + 8.0f;
+        list_bottom = dismiss_top - 8.0f;
+    }
+    const float list_height = std::max(0.0f, list_bottom - list_top);
+    row_height = std::min(row_height, std::max(32.0f, list_height));
+    const int capacity = std::max(
+        1, static_cast<int>((list_height + row_gap) / (row_height + row_gap)));
+    sheet_scroll_capacity_ = capacity;
+    sheet_scroll_max_ = std::max(0, static_cast<int>(count) - capacity);
+    sheet_scroll_row_ = std::clamp(sheet_scroll_row_, 0, sheet_scroll_max_);
+
+    draw_header(header_top);
+
+    const float rail_width =
+        std::min(compact ? 40.0f : 44.0f, std::max(20.0f, content_width * 0.22f));
+    const float rail_gap =
+        std::min(compact ? 8.0f : 12.0f, std::max(2.0f, content_width * 0.04f));
+    const float option_width = std::max(24.0f, content_width - rail_width - rail_gap);
+    const float rail_x = left + content_width - rail_width;
+    const int first = sheet_scroll_row_;
+    const int last = std::min(static_cast<int>(count), first + capacity);
+    for (int i = first; i < last; ++i) {
+        const Rect button{left, list_top + static_cast<float>(i - first) * (row_height + row_gap),
+                          option_width, row_height};
+        const std::string label = confirm
+                                      ? (i == 0 ? sheet_.confirm_label : "No")
+                                      : sheet_.options[static_cast<std::size_t>(i)];
+        canvas.fill_rounded_rect(button, 16.0f, kSecondary);
+        draw_option_label(canvas, button, option_style, label);
+        add_target(button, UiAction::SheetOption, i);
+    }
+
+    // The rail is pointer/touch scrolling. Its targets own the tap as
+    // SheetScroll actions, so a tap can never fall through to an option; the
+    // bumpers page the list for a gamepad, and the keyboard handles arrows,
+    // Page keys, Home, and End.
+    const float rail_button_height = std::min(compact ? 44.0f : 48.0f, list_height * 0.5f);
+    const Rect up{rail_x, list_top, rail_width, rail_button_height};
+    const Rect down{rail_x, list_bottom - rail_button_height, rail_width, rail_button_height};
+    const bool can_up = sheet_scroll_row_ > 0;
+    const bool can_down = sheet_scroll_row_ < sheet_scroll_max_;
+    const auto draw_rail_button = [&](Rect rect, bool down_arrow, bool enabled, UiAction action) {
+        canvas.fill_rounded_rect(rect, rect.h * 0.5f,
+                                 fade(kSecondary, enabled ? 0.95f : 0.35f));
+        draw_chevron(canvas, rect.center_x(), rect.center_y(), rect.h * 0.32f, down_arrow,
+                     fade(enabled ? kForeground : kMuted, enabled ? 1.0f : 0.45f));
+        add_target(rect, action);
+    };
+    draw_rail_button(up, false, can_up, UiAction::SheetScrollUp);
+    draw_rail_button(down, true, can_down, UiAction::SheetScrollDown);
+    const float track_top = up.y + up.h + 6.0f;
+    const float track_bottom = down.y - 6.0f;
+    if (track_bottom > track_top) {
+        const float rail_center = rail_x + rail_width * 0.5f;
+        canvas.stroke_line(rail_center, track_top, rail_center, track_bottom, 2.0f,
+                           hex(0x2f372f, 0.9f));
+        const float track_height = track_bottom - track_top;
+        const float thumb_height =
+            std::max(20.0f, track_height * static_cast<float>(capacity) /
+                                static_cast<float>(std::max(1, static_cast<int>(count))));
+        const float travel = std::max(0.0f, track_height - thumb_height);
+        const float progress = sheet_scroll_max_ > 0
+                                   ? static_cast<float>(sheet_scroll_row_) /
+                                         static_cast<float>(sheet_scroll_max_)
+                                   : 0.0f;
+        canvas.fill_rounded_rect(
+            Rect{rail_center - 2.0f, track_top + travel * progress, 4.0f, thumb_height}, 2.0f,
+            hex(0x9ca49c, 0.65f));
+    }
+    sheet_scroll_up_ = up;
+    sheet_scroll_down_ = down;
+
     const Rect dismiss{area.center_x() - dismiss_width * 0.5f, dismiss_top, dismiss_width,
                        dismiss_height};
     canvas.text(dismiss.center_x(), dismiss.center_y(), dismiss_style, "Dismiss");

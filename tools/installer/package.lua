@@ -79,6 +79,8 @@ function main(package)
     specvars.PACKAGE_OUTPUTFILE = path.absolute(package:outputfile())
     specvars.PACKAGE_ICONFILE = iconfile
     specvars.PACKAGE_LICENSEFILE = path.absolute(package:get("licensefile"))
+    specvars.PACKAGE_SPEEX_LICENSEFILE =
+        path.absolute(path.join(os.projectdir(), "third_party", "speexdsp", "COPYING"))
     specvars.PACKAGE_MANIFESTFILE = path.absolute(path.join(os.projectdir(), "assets", "manifest.json"))
     -- Bundled art is optional: pack whatever tools/fetch-assets has cached so
     -- an installed copy needs no first-run download. The repo never commits it.

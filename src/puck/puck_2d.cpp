@@ -523,9 +523,10 @@ void Puck2D::draw_placeholder(Canvas& canvas, Rect bounds, const PuckVisual& vis
                          py(cy + body_ry * 0.16f), skin_shadow);
 
     // Mouth.
+    const float mouth_open = std::clamp(visual.mouth, 0.0f, 1.0f);
     const float mouth_y = cy + body_ry * 0.33f;
-    if (visual.speaking) {
-        const float open = 0.018f + 0.014f * std::abs(std::sin(time_seconds * 9.0f));
+    if (mouth_open > 0.02f) {
+        const float open = 0.014f + 0.030f * mouth_open;
         canvas.fill_ellipse(px(cx, mouth_y), py(mouth_y), size * 0.038f, size * open, line);
     } else {
         canvas.stroke_line(px(cx - size * 0.085f, mouth_y), py(mouth_y),
@@ -672,11 +673,6 @@ void Puck2D::draw_assets(Canvas& canvas, Rect bounds, const PuckVisual& visual, 
     blink = std::max(blink, lids_);
 
     float mouth_target = std::clamp(visual.mouth, 0.0f, 1.0f);
-    if (visual.speaking) {
-        const float speech = 0.16f + 0.34f * (0.5f + 0.5f * std::sin(time * 8.7f)) *
-                                          (0.65f + 0.35f * std::sin(time * 3.1f + 1.2f));
-        mouth_target = std::max(mouth_target, speech);
-    }
     if (first) {
         mouth_open_ = mouth_target;
     } else {

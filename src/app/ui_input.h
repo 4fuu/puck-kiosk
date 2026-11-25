@@ -22,6 +22,9 @@ enum class UiAction {
     SheetOption,
     SheetDismiss,
     SheetOk,
+    SheetScrollUp,
+    SheetScrollDown,
+    PairingRetry,
     PasskeyConfirm,
     DebugOpen,
     DebugClose,
@@ -111,6 +114,9 @@ struct UiActionHandlers {
     std::function<void(int)> sheet_option;
     std::function<void()> sheet_dismiss;
     std::function<void()> sheet_ok;
+    // Discards the current challenge/session and starts a fresh pairing
+    // attempt. The app wires this to PairingSession::restart.
+    std::function<void()> pairing_retry;
     std::function<void()> passkey_confirm;
     std::function<void()> debug_open;
     std::function<void()> debug_close;

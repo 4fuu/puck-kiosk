@@ -1234,11 +1234,6 @@ void update_animation(Animation* animation, const PuckVisual& visual, float time
     animation->blink = std::max(blink, animation->lids);
 
     float mouth_target = std::max(0.0f, std::min(1.0f, visual.mouth));
-    if (visual.speaking) {
-        const float speech = 0.16f + 0.34f * (0.5f + 0.5f * std::sin(time_seconds * 8.7f)) *
-                                          (0.65f + 0.35f * std::sin(time_seconds * 3.1f + 1.2f));
-        mouth_target = std::max(mouth_target, speech);
-    }
     if (first) {
         animation->mouth = mouth_target;
     } else {
@@ -1253,8 +1248,11 @@ void update_animation(Animation* animation, const PuckVisual& visual, float time
         animation->spotlight = spotlight_target;
         animation->filter = filter_target;
     } else {
+        // Fast rise, slow fall: a short pause in the output keeps the stage
+        // lit, while the actor's 500 ms speaking hold still owns the state.
+        const float spot_rate = spotlight_target > animation->spotlight ? 12.0f : 2.2f;
         animation->spotlight +=
-            (spotlight_target - animation->spotlight) * (1.0f - std::exp(-dt * 4.0f));
+            (spotlight_target - animation->spotlight) * (1.0f - std::exp(-dt * spot_rate));
         animation->filter += (filter_target - animation->filter) * (1.0f - std::exp(-dt * 4.0f));
     }
 }

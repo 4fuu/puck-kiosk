@@ -227,6 +227,109 @@ int main() {
         std::printf("PASS: muted call shows its caption\n");
     }
 
+    // The Mute button carries the local input meter: a green fill when the
+    // microphone is live, and none when muted.
+    ui.set_sheet({});
+    pk::CallView mic;
+    mic.phase = pk::CallPhase::Active;
+    mic.input_level = 0.05f;
+    mic.caption = "On a call with Puck";
+    ui.set_call(mic);
+    renderer.begin(display.size(), display.dpi_scale());
+    ui.draw(renderer.canvas(), display.size(), 4.0f);
+    renderer.end();
+    display.swap();
+    if (!read_ppm(output, &image)) {
+        return fail("cannot read the mic-meter frame");
+    }
+    const pk::UiTarget* mute = nullptr;
+    for (const pk::UiTarget& target : ui.hit_map().targets()) {
+        if (target.action == pk::UiAction::Mute) {
+            mute = &target;
+            break;
+        }
+    }
+    if (!mute) {
+        return fail("the active call has no Mute button");
+    }
+    int meter_pixels = 0;
+    const int meter_x0 = static_cast<int>(mute->rect.x + mute->rect.w * 0.25f);
+    const int meter_x1 = static_cast<int>(mute->rect.x + mute->rect.w * 0.75f);
+    const int meter_y0 = static_cast<int>(mute->rect.y + mute->rect.h * 0.72f);
+    const int meter_y1 = static_cast<int>(mute->rect.y + mute->rect.h * 0.92f);
+    for (int y = meter_y0; y <= meter_y1; ++y) {
+        for (int x = meter_x0; x <= meter_x1; ++x) {
+            const Rgb color = pixel_at(image, x, y);
+            if (color.g > color.r + 20 && color.g > color.b + 12) {
+                ++meter_pixels;
+            }
+        }
+    }
+    if (meter_pixels < 100) {
+        std::fprintf(stderr, "the live microphone fill drew only %d green pixels\n",
+                     meter_pixels);
+        ++failures;
+    } else {
+        std::printf("PASS: live microphone fill renders (%d px)\n", meter_pixels);
+    }
+
+    mic.phase = pk::CallPhase::Muted;
+    mic.muted = true;
+    ui.set_call(mic);
+    renderer.begin(display.size(), display.dpi_scale());
+    ui.draw(renderer.canvas(), display.size(), 4.2f);
+    renderer.end();
+    display.swap();
+    if (!read_ppm(output, &image)) {
+        return fail("cannot read the muted-meter frame");
+    }
+    int muted_meter_pixels = 0;
+    for (int y = meter_y0; y <= meter_y1; ++y) {
+        for (int x = meter_x0; x <= meter_x1; ++x) {
+            const Rgb color = pixel_at(image, x, y);
+            if (color.g > color.r + 20 && color.g > color.b + 12) {
+                ++muted_meter_pixels;
+            }
+        }
+    }
+    if (muted_meter_pixels != 0) {
+        std::fprintf(stderr, "the muted microphone kept %d fill pixels\n",
+                     muted_meter_pixels);
+        ++failures;
+    } else {
+        std::printf("PASS: muted microphone clears the fill\n");
+    }
+
+    // Quiet speech still lights the bottom of the meter.
+    mic.phase = pk::CallPhase::Active;
+    mic.muted = false;
+    mic.input_level = 0.004f;
+    ui.set_call(mic);
+    renderer.begin(display.size(), display.dpi_scale());
+    ui.draw(renderer.canvas(), display.size(), 5.0f);
+    renderer.end();
+    display.swap();
+    if (!read_ppm(output, &image)) {
+        return fail("cannot read the quiet-meter frame");
+    }
+    int quiet_meter_pixels = 0;
+    for (int y = meter_y0; y <= meter_y1; ++y) {
+        for (int x = meter_x0; x <= meter_x1; ++x) {
+            const Rgb color = pixel_at(image, x, y);
+            if (color.g > color.r + 20 && color.g > color.b + 12) {
+                ++quiet_meter_pixels;
+            }
+        }
+    }
+    if (quiet_meter_pixels < 100) {
+        std::fprintf(stderr, "the quiet microphone fill drew only %d green pixels\n",
+                     quiet_meter_pixels);
+        ++failures;
+    } else {
+        std::printf("PASS: quiet microphone fill stays visible (%d px)\n",
+                    quiet_meter_pixels);
+    }
+
     // Client caption chrome: windowed Win32 has no OS title bar, so the app
     // draws this strip and translates the screen content below it.
     ui.set_client_caption(true);
@@ -355,6 +458,85 @@ int main() {
             ++failures;
         } else {
             std::printf("PASS: pairing loading status renders (%d px)\n", status_ink.pixels);
+        }
+    }
+
+    // A small pairing window with a real Try Again button. The button has a
+    // pill fill and label ink, and its hit rect stays inside the window.
+    {
+        const std::string small_output = "build/ui-retry-small.ppm";
+        pk::HeadlessDisplay small(420, 640, small_output, 1);
+        if (!small.initialize(&error)) {
+            return fail("small headless display: " + error);
+        }
+        small.make_current();
+        pk::Renderer small_renderer;
+        if (!small_renderer.initialize("", &error)) {
+            return fail("small renderer: " + error);
+        }
+        pk::CarUi small_ui(puck);
+        small_ui.set_pairing(pk::QrCode{}, "Confirm on your phone", "", "482 913");
+        small_ui.set_pairing_recovery(pk::PairingRecovery::Retry);
+        small_renderer.begin(small.size(), small.dpi_scale());
+        small_ui.draw(small_renderer.canvas(), small.size(), 0.0f);
+        small_renderer.end();
+        small.swap();
+        Image retry_image;
+        if (!read_ppm(small_output, &retry_image)) {
+            return fail("cannot read " + small_output);
+        }
+        const pk::UiTarget* retry = nullptr;
+        for (const pk::UiTarget& target : small_ui.hit_map().targets()) {
+            if (target.action == pk::UiAction::PairingRetry) {
+                retry = &target;
+                break;
+            }
+        }
+        if (!retry) {
+            std::fprintf(stderr, "the small pairing screen has no Try Again target\n");
+            ++failures;
+        } else if (retry->rect.x < 0.0f || retry->rect.y < 0.0f ||
+                   retry->rect.x + retry->rect.w > 420.0f ||
+                   retry->rect.y + retry->rect.h > 640.0f) {
+            std::fprintf(stderr, "Try Again leaves the small window: %.1f,%.1f %.1fx%.1f\n",
+                         retry->rect.x, retry->rect.y, retry->rect.w, retry->rect.h);
+            ++failures;
+        } else {
+            const InkBounds ink = ink_bounds(retry_image, retry->rect);
+            if (!ink.found || ink.pixels < 40) {
+                std::fprintf(stderr, "Try Again drew no readable ink in the small window\n");
+                ++failures;
+            } else {
+                std::printf("PASS: small pairing Try Again renders (%d px)\n", ink.pixels);
+            }
+        }
+
+        // A terminal failure with no QR or confirmation code must not paint the
+        // white placeholder card; only the text and pill remain bright.
+        small_ui.set_pairing(pk::QrCode{}, "Call Puck", "Pairing failed", "");
+        small_ui.set_pairing_recovery(pk::PairingRecovery::Retry);
+        small_renderer.begin(small.size(), small.dpi_scale());
+        small_ui.draw(small_renderer.canvas(), small.size(), 0.1f);
+        small_renderer.end();
+        small.swap();
+        Image failed_image;
+        if (!read_ppm(small_output, &failed_image)) {
+            return fail("cannot read the failure frame");
+        }
+        int white_pixels = 0;
+        for (std::size_t i = 0; i + 2 < failed_image.rgb.size(); i += 3) {
+            if (failed_image.rgb[i] > 240 && failed_image.rgb[i + 1] > 240 &&
+                failed_image.rgb[i + 2] > 240) {
+                ++white_pixels;
+            }
+        }
+        if (white_pixels > 5000) {
+            std::fprintf(stderr, "terminal pairing still painted %d white placeholder pixels\n",
+                         white_pixels);
+            ++failures;
+        } else {
+            std::printf("PASS: terminal pairing draws no white QR placeholder (%d px)\n",
+                        white_pixels);
         }
     }
 

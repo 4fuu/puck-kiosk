@@ -400,6 +400,60 @@ nlohmann::json decode_devalue_index(const nlohmann::json& values, int index, int
     return decoded;
 }
 
+bool parse_car_page(const std::string& page, CarSession* parsed, std::string* error) {
+    std::string car;
+    if (!extract_car_object(page, &car, error)) {
+        return false;
+    }
+    std::string puck;
+    if (!extract_object_field(car, "puck", &puck)) {
+        if (error) {
+            *error = "car.puck is missing";
+        }
+        return false;
+    }
+    std::string thread;
+    if (!extract_object_field(puck, "thread", &thread)) {
+        if (error) {
+            *error = "car.puck.thread is missing";
+        }
+        return false;
+    }
+
+    CarSession next;
+    if (!extract_string_field(thread, "id", &next.thread_id) || next.thread_id.empty()) {
+        if (error) {
+            *error = "car.puck.thread.id is missing";
+        }
+        return false;
+    }
+
+    std::string actor_config;
+    if (!extract_object_field(puck, "threadActorConfig", &actor_config)) {
+        if (!extract_object_field(page, "threadActorConfig", &actor_config)) {
+            if (error) {
+                *error = "threadActorConfig is missing";
+            }
+            return false;
+        }
+        log::warn("car.puck.threadActorConfig is missing; using the page-level actor config");
+    }
+    if (!extract_string_field(actor_config, "baseURL", &next.actor_base_url) ||
+        next.actor_base_url.empty()) {
+        if (error) {
+            *error = "threadActorConfig.baseURL is missing";
+        }
+        return false;
+    }
+    extract_string_field(actor_config, "ampURL", &next.actor_amp_url);
+    extract_string_field(actor_config, "poolName", &next.actor_pool);
+    extract_string_field(actor_config, "capability", &next.capability);
+    extract_bool_field(actor_config, "requiresSudoForWrite", &next.requires_sudo_for_write);
+
+    *parsed = std::move(next);
+    return true;
+}
+
 bool decode_devalue_data(const std::string& data, nlohmann::json* result, std::string* error) {
     auto values = nlohmann::json::parse(data, nullptr, false);
     if (values.is_discarded() || !values.is_array() || values.empty()) {
@@ -536,6 +590,135 @@ PairingSession::PairingSession(HttpClient& http, SecureStore* store, PairingOpti
     options_.origin = strip_trailing_slash(options_.origin);
 }
 
+PairingSession::~PairingSession() {
+    stop_polling();
+}
+
+void PairingSession::start_polling() {
+    std::lock_guard<std::mutex> lifecycle(poll_lifecycle_mutex_);
+    std::thread finished;
+    {
+        std::lock_guard<std::mutex> lock(poll_wait_mutex_);
+        if (poll_thread_.joinable()) {
+            if (poll_running_) {
+                return;
+            }
+            // A worker that stopped on a terminal result is joinable but no
+            // longer polling. restart() must be able to replace it.
+            finished = std::move(poll_thread_);
+        }
+    }
+    // Finish any old-round cleanup before a replacement worker can start its
+    // first claim. This keeps an old session DELETE ahead of the new session.
+    if (finished.joinable()) {
+        finished.join();
+    }
+    {
+        std::lock_guard<std::mutex> lock(poll_wait_mutex_);
+        poll_stop_ = false;
+        poll_wakeup_ = false;
+        poll_running_ = true;
+        poll_thread_ = std::thread([this] { run_poll_loop(); });
+    }
+}
+
+void PairingSession::stop_polling() {
+    std::lock_guard<std::mutex> lifecycle(poll_lifecycle_mutex_);
+    {
+        std::lock_guard<std::mutex> lock(poll_wait_mutex_);
+        poll_stop_ = true;
+        poll_wakeup_ = true;
+    }
+    poll_wake_.notify_all();
+    std::thread thread;
+    {
+        std::lock_guard<std::mutex> lock(poll_wait_mutex_);
+        if (poll_thread_.joinable()) {
+            thread = std::move(poll_thread_);
+        }
+    }
+    if (thread.joinable()) {
+        thread.join();
+    }
+}
+
+bool PairingSession::take_update(PairingUpdate* update) {
+    std::lock_guard<std::mutex> lock(update_mutex_);
+    if (!latest_.valid) {
+        return false;
+    }
+    if (update) {
+        *update = latest_;
+    }
+    latest_ = PairingUpdate{};
+    return true;
+}
+
+bool PairingSession::can_retry() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return state_ == PairingState::Scanned || state_ == PairingState::Failed ||
+           state_ == PairingState::Expired || paired_unacknowledged_ ||
+           !last_poll_error_.empty();
+}
+
+bool PairingSession::paired_pending() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return state_ == PairingState::Paired && paired_unacknowledged_;
+}
+
+bool PairingSession::acknowledge_paired() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (state_ != PairingState::Paired || !paired_unacknowledged_ ||
+        paired_generation_ != challenge_generation_) {
+        return false;
+    }
+    paired_unacknowledged_ = false;
+    return true;
+}
+
+bool PairingSession::expire(const std::string& message) {
+    PairingStatus status;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (state_ == PairingState::Paired && paired_unacknowledged_) {
+            discard_pending_ = true;
+        }
+        state_ = PairingState::Expired;
+        last_code_.clear();
+        last_poll_error_ = message;
+        status.state = state_;
+        status.message = message;
+        publish_update_locked(status);
+    }
+    {
+        std::lock_guard<std::mutex> lock(poll_wait_mutex_);
+        poll_wakeup_ = true;
+    }
+    poll_wake_.notify_all();
+    log::info("pairing: %s", message.c_str());
+    return true;
+}
+
+std::string PairingSession::pairing_url() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return pairing_url_;
+}
+
+std::string PairingSession::remote_hash() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return remote_hash_;
+}
+
+QrCode PairingSession::qr() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return qr_;
+}
+
+int PairingSession::challenge_generation() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return challenge_generation_;
+}
+
 bool PairingSession::restore(CarSession* saved, std::string* error) {
     if (error) {
         error->clear();
@@ -578,8 +761,21 @@ bool PairingSession::start(std::string* error) {
         error->clear();
     }
     const auto started = Clock::now();
-    state_ = PairingState::Idle;
-    remote_hash_.clear();
+    // A new pairing round must not fall back to the previous user's saved
+    // session if setup or loading fails before persist().
+    if (store_) {
+        store_->erase("car.session");
+        store_->erase("http.cookies");
+    }
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        state_ = PairingState::Idle;
+        remote_hash_.clear();
+        last_poll_error_.clear();
+        paired_generation_ = 0;
+        paired_unacknowledged_ = false;
+        discard_pending_ = false;
+    }
     if (!resolve_remote_hash(error)) {
         return false;
     }
@@ -587,10 +783,20 @@ bool PairingSession::start(std::string* error) {
     if (!regenerate_challenge(error)) {
         return false;
     }
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        // The caller renders this first QR from the getters; the first poll
+        // snapshot should not claim the challenge changed again.
+        published_generation_ = challenge_generation_;
+    }
     log::info("startup: challenge generated in %lld ms", elapsed_ms(hash_done));
     log::info("startup: pairing prepared in %lld ms", elapsed_ms(started));
-    state_ = PairingState::Waiting;
     return true;
+}
+
+void PairingSession::set_remote_hash(std::string hash) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    remote_hash_ = std::move(hash);
 }
 
 bool PairingSession::resolve_remote_hash(std::string* error) {
@@ -606,7 +812,7 @@ bool PairingSession::resolve_remote_hash(std::string* error) {
         if (!http_get(http_, options_.origin + "/car", &page, &page_error)) {
             log::warn("cannot inspect /car (%s); using fallback remote hash %s",
                       page_error.c_str(), options_.fallback_hash.c_str());
-            remote_hash_ = options_.fallback_hash;
+            set_remote_hash(options_.fallback_hash);
             return true;
         }
         log::info("startup: GET /car %lld ms", elapsed_ms(page_started));
@@ -616,8 +822,8 @@ bool PairingSession::resolve_remote_hash(std::string* error) {
     // module walk; check the page before requesting any chunk.
     const std::string page_hash = extract_remote_hash(page);
     if (!page_hash.empty()) {
-        remote_hash_ = page_hash;
-        log::info("resolved SvelteKit remote hash: %s", remote_hash_.c_str());
+        set_remote_hash(page_hash);
+        log::info("resolved SvelteKit remote hash: %s", page_hash.c_str());
         log::info("startup: remote hash resolved from /car in %lld ms", elapsed_ms(started));
         return true;
     }
@@ -669,8 +875,8 @@ bool PairingSession::resolve_remote_hash(std::string* error) {
             const std::string& content = results[i].response.body;
             const std::string hash = extract_remote_hash(content);
             if (!hash.empty()) {
-                remote_hash_ = hash;
-                log::info("resolved SvelteKit remote hash: %s", remote_hash_.c_str());
+                set_remote_hash(hash);
+                log::info("resolved SvelteKit remote hash: %s", hash.c_str());
                 log::info("startup: node scripts %zu requests %lld ms", node_requests,
                           elapsed_ms(nodes_started));
                 log::info("startup: remote hash resolved after %zu requests, %lld ms",
@@ -755,23 +961,28 @@ bool PairingSession::resolve_remote_hash(std::string* error) {
         log::info("startup: chunk wave %zu: %zu requests %lld ms", waves, batch.size(),
                   elapsed_ms(wave_started));
         if (!found.empty()) {
-            remote_hash_ = found;
-            log::info("resolved SvelteKit remote hash: %s", remote_hash_.c_str());
+            set_remote_hash(found);
+            log::info("resolved SvelteKit remote hash: %s", found.c_str());
             log::info("startup: remote hash resolved after %zu requests in %zu waves, %lld ms",
                       node_requests + fetched, waves, elapsed_ms(started));
             return true;
         }
     }
 
-    remote_hash_ = options_.fallback_hash;
+    set_remote_hash(options_.fallback_hash);
     log::warn("could not resolve the SvelteKit remote hash from /car; using fallback %s",
-              remote_hash_.c_str());
+              options_.fallback_hash.c_str());
     log::info("startup: remote hash fallback after %zu requests in %zu waves, %lld ms",
               node_requests + fetched, waves, elapsed_ms(started));
     return true;
 }
 
 bool PairingSession::regenerate_challenge(std::string* error) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return regenerate_challenge_locked(error);
+}
+
+bool PairingSession::regenerate_challenge_locked(std::string* error) {
     verifier_ = random_bytes_as_base64(32);
     std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
     SHA256(reinterpret_cast<const unsigned char*>(verifier_.data()), verifier_.size(), digest.data());
@@ -787,7 +998,45 @@ bool PairingSession::regenerate_challenge(std::string* error) {
     challenge_created_ = std::chrono::steady_clock::now();
     ++challenge_generation_;
     last_code_.clear();
+    last_poll_error_.clear();
+    paired_generation_ = 0;
+    paired_unacknowledged_ = false;
     state_ = PairingState::Waiting;
+    return true;
+}
+
+bool PairingSession::restart(std::string* error) {
+    if (error) {
+        error->clear();
+    }
+    PairingStatus status;
+    bool discard = false;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        // A successful reply can be published before the UI consumes it. A
+        // retry at that moment still owns an account-creating session, so it
+        // must delete that session and keep polling for the new round.
+        discard = state_ == PairingState::Paired && paired_unacknowledged_;
+        if (!regenerate_challenge_locked(error)) {
+            return false;
+        }
+        discard_pending_ = discard_pending_ || discard;
+        status.state = state_;
+        status.message = "Waiting for scan";
+        publish_update_locked(status);
+    }
+    {
+        std::lock_guard<std::mutex> lock(poll_wait_mutex_);
+        // A retry cancels a pending stop as well: an in-flight request from
+        // the expired round must not end the worker before the new claim.
+        poll_stop_ = false;
+        poll_wakeup_ = true;
+    }
+    poll_wake_.notify_all();
+    // The worker may have stopped on a terminal result or an unconsumed
+    // Paired snapshot. Revive it so the new round is actually polled.
+    start_polling();
+    log::info("pairing: restarted with a fresh challenge");
     return true;
 }
 
@@ -844,6 +1093,7 @@ bool PairingSession::decode_pairing_response(const std::string& body, PairingSta
         }
         status->state = PairingState::Failed;
         status->message = error ? *error : message;
+        status->terminal = true;
         return false;
     }
     if (type != "result" || !envelope.contains("data")) {
@@ -890,6 +1140,7 @@ bool PairingSession::decode_pairing_response(const std::string& body, PairingSta
     } else {
         status->state = PairingState::Failed;
         status->message = "Unexpected pairing status: " + value;
+        status->terminal = true;
         if (error) {
             *error = status->message;
         }
@@ -898,44 +1149,143 @@ bool PairingSession::decode_pairing_response(const std::string& body, PairingSta
     return true;
 }
 
-PairingStatus PairingSession::poll(std::string* error) {
-    if (error) {
-        error->clear();
+void PairingSession::publish_update_locked(const PairingStatus& status, bool stale) {
+    PairingUpdate update;
+    update.valid = true;
+    update.stale = stale;
+    update.status = status;
+    update.generation = challenge_generation_;
+    update.qr = qr_;
+    update.pairing_url = pairing_url_;
+    update.challenge_changed = challenge_generation_ != published_generation_;
+    published_generation_ = challenge_generation_;
+    update.can_retry = state_ == PairingState::Scanned || state_ == PairingState::Failed ||
+                       state_ == PairingState::Expired || paired_unacknowledged_ ||
+                       !last_poll_error_.empty();
+    {
+        std::lock_guard<std::mutex> lock(update_mutex_);
+        latest_ = std::move(update);
     }
+}
+
+void PairingSession::discard_stale_session() {
+    std::lock_guard<std::mutex> round(round_mutex_);
+    discard_stale_session_locked();
+}
+
+void PairingSession::discard_stale_session_locked() {
+    HttpRequest request;
+    request.method = "DELETE";
+    request.url = options_.origin + "/api/car/session";
+    request.headers = {
+        {"Origin", options_.origin},
+        {"Referer", options_.origin + "/car"},
+        {"User-Agent", kUserAgent},
+    };
+    std::string error;
+    const HttpResponse response = http_.request(request, &error);
+    if (!error.empty()) {
+        log::warn("pairing: cannot discard the stale session: %s", redact_text(error).c_str());
+    } else if (response.status >= 400 && response.status != 401) {
+        log::warn("pairing: stale session discard returned HTTP %d", response.status);
+    } else {
+        log::info("pairing: discarded the stale paired session");
+    }
+    // The next round must not inherit the abandoned account even when the
+    // server's 204 does not expire the cookie. This is local state, so do it
+    // regardless of the DELETE response or its headers.
+    http_.clear_cookies();
+}
+
+bool PairingSession::poll_once() {
+    // The delete for an abandoned round and the generation/verifier this poll
+    // is about to claim must be sampled together. Otherwise restart() can slip
+    // between take_discard_request() and the generation read: the old session
+    // is deleted with one round's state while the claim is sent for another.
+    std::unique_lock<std::mutex> round(round_mutex_);
+
+    bool discard = false;
+    bool terminal_paired = false;
+    bool terminal_stop = false;
+    bool no_challenge = false;
+    bool refresh_failed = false;
+    PairingStatus refresh_failure;
     PairingStatus status;
-    status.state = state_;
-    status.code = last_code_;
+    std::string verifier;
+    int generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        discard = discard_pending_;
+        discard_pending_ = false;
 
-    if (state_ == PairingState::Paired || state_ == PairingState::Failed ||
-        state_ == PairingState::Expired) {
-        return status;
-    }
-    if (challenge_generation_ == 0) {
-        if (error) {
-            *error = "pairing has not started";
-        }
-        return status;
-    }
-
-    if (options_.challenge_lifetime_seconds > 0 &&
-        std::chrono::steady_clock::now() - challenge_created_ >=
-            std::chrono::seconds(options_.challenge_lifetime_seconds)) {
-        std::string refresh_error;
-        if (!regenerate_challenge(&refresh_error)) {
-            if (error) {
-                *error = refresh_error;
+        if (state_ == PairingState::Paired) {
+            // Keep the worker alive while a successful snapshot is waiting
+            // for the UI. A restart at this point must be able to continue
+            // with a new challenge instead of leaving the poller dead.
+            terminal_paired = true;
+        } else if (state_ == PairingState::Failed || state_ == PairingState::Expired) {
+            terminal_stop = true;
+        } else if (challenge_generation_ == 0) {
+            no_challenge = true;
+        } else {
+            if (options_.challenge_lifetime_seconds > 0 && last_code_.empty() &&
+                std::chrono::steady_clock::now() - challenge_created_ >=
+                    std::chrono::seconds(options_.challenge_lifetime_seconds)) {
+                std::string refresh_error;
+                if (!regenerate_challenge_locked(&refresh_error)) {
+                    last_poll_error_ = refresh_error;
+                    refresh_failure.state = state_;
+                    refresh_failure.message = refresh_error;
+                    publish_update_locked(refresh_failure);
+                    refresh_failed = true;
+                } else {
+                    log::info("pairing challenge refreshed");
+                    PairingStatus refreshed;
+                    refreshed.state = PairingState::Waiting;
+                    refreshed.message = "Waiting for scan";
+                    publish_update_locked(refreshed);
+                }
             }
-            return status;
+            if (!refresh_failed) {
+                generation = challenge_generation_;
+                verifier = verifier_;
+                status.state = state_;
+                status.code = last_code_;
+            }
         }
-        log::info("pairing challenge refreshed");
-        status.state = PairingState::Waiting;
-        status.message = "Waiting for scan";
+    }
+
+    if (discard) {
+        discard_stale_session_locked();
+    }
+    if (no_challenge) {
+        log::warn("pairing: poll requested before a challenge exists");
+        return false;
+    }
+    if (refresh_failed) {
+        return true;
+    }
+    if (terminal_paired || terminal_stop) {
+        // restart() may have run while the DELETE was in flight. Keep the
+        // worker alive for the new challenge rather than letting the stale
+        // terminal snapshot stop it.
+        bool revived = false;
+        bool keep_alive = false;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            revived = state_ == PairingState::Waiting || state_ == PairingState::Scanned;
+            keep_alive = terminal_paired && paired_unacknowledged_;
+        }
+        if (revived) {
+            return true;
+        }
+        return terminal_paired ? keep_alive : false;
     }
 
     nlohmann::json devalue = nlohmann::json::array();
     devalue.push_back({{"device", 1}, {"verifier", 2}});
     devalue.push_back("car");
-    devalue.push_back(verifier_);
+    devalue.push_back(verifier);
     const std::string devalue_text = devalue.dump();
     const std::string payload =
         base64_encode(reinterpret_cast<const std::uint8_t*>(devalue_text.data()), devalue_text.size());
@@ -944,21 +1294,140 @@ PairingStatus PairingSession::poll(std::string* error) {
         {"refreshes", nlohmann::json::array()},
     };
 
-    auto response = post_remote("claimDevicePairing", request_body.dump(), error);
-    if (error && !error->empty()) {
-        status.state = state_;
-        status.message = *error;
-        return status;
+    std::string request_error;
+    const HttpResponse response =
+        post_remote("claimDevicePairing", request_body.dump(), &request_error);
+    PairingStatus decoded;
+    std::string decode_error;
+    bool decoded_ok = false;
+    if (request_error.empty()) {
+        decoded_ok = decode_pairing_response(response.body, &decoded, &decode_error);
     }
-    if (!decode_pairing_response(response.body, &status, error)) {
-        state_ = status.state;
-        return status;
+
+    bool stale = false;
+    bool discard_reply = false;
+    bool stop_worker = false;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (generation != challenge_generation_ || state_ == PairingState::Expired) {
+            stale = true;
+            // The web deletes a session created by a round the user already
+            // replaced, so a late confirmation cannot leave that account
+            // attached to the car.
+            discard_reply = decoded_ok && decoded.state == PairingState::Paired;
+        } else if (!request_error.empty() || !decoded_ok) {
+            const std::string message =
+                !request_error.empty() ? request_error
+                                       : (decode_error.empty() ? "pairing request failed" : decode_error);
+            last_poll_error_ = message;
+            PairingStatus failed;
+            const bool transient_http =
+                !request_error.empty() &&
+                (response.status == 0 || response.status == 408 || response.status == 429 ||
+                 response.status < 400 || response.status >= 500);
+            const bool terminal_response =
+                (!request_error.empty() && !transient_http) ||
+                (request_error.empty() && decoded.terminal);
+            if (!terminal_response) {
+                // Transport, 5xx, 408/429 and payload errors are transient:
+                // keep the current challenge and QR usable while retrying.
+                failed.state = state_;
+                failed.code = last_code_;
+            } else {
+                // The server rejected the challenge; stop polling until the
+                // user retries with a fresh one.
+                state_ = PairingState::Failed;
+                last_code_.clear();
+                failed.state = state_;
+                failed.terminal = true;
+                stop_worker = true;
+            }
+            failed.message = message;
+            publish_update_locked(failed);
+        } else {
+            last_poll_error_.clear();
+            state_ = decoded.state;
+            if (decoded.state == PairingState::Waiting) {
+                // The server explicitly sent the challenge back to pending;
+                // drop the confirmation code so the QR is shown again.
+                decoded.code.clear();
+                last_code_.clear();
+            } else if (decoded.state == PairingState::Scanned) {
+                last_code_ = decoded.code;
+            } else if (decoded.state == PairingState::Paired) {
+                last_code_.clear();
+                paired_generation_ = generation;
+                paired_unacknowledged_ = true;
+            }
+            publish_update_locked(decoded);
+        }
     }
-    state_ = status.state;
-    if (status.state == PairingState::Scanned) {
-        last_code_ = status.code;
+
+    if (stale) {
+        log::info("pairing: ignoring a reply from an abandoned challenge");
+        if (discard_reply) {
+            // poll_once() holds round_mutex_ across this claim, so use the
+            // locked delete rather than taking it twice.
+            discard_stale_session_locked();
+        }
     }
-    return status;
+    return !stop_worker;
+}
+
+bool PairingSession::take_discard_request() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const bool discard = discard_pending_;
+    discard_pending_ = false;
+    return discard;
+}
+
+void PairingSession::run_poll_loop() {
+    const auto interval = std::chrono::seconds(std::max(1, options_.poll_interval_seconds));
+    bool first = true;
+    while (true) {
+        bool stopped_with_discard = false;
+        if (!first) {
+            std::unique_lock<std::mutex> lock(poll_wait_mutex_);
+            poll_wake_.wait_for(lock, interval, [this] { return poll_stop_ || poll_wakeup_; });
+            if (poll_stop_) {
+                stopped_with_discard = take_discard_request();
+                poll_running_ = false;
+                lock.unlock();
+                // An unconsumed successful pairing can still own a session
+                // even though the UI stopped before acknowledging it.
+                if (stopped_with_discard) {
+                    discard_stale_session();
+                }
+                return;
+            }
+            poll_wakeup_ = false;
+        }
+        first = false;
+        if (poll_once()) {
+            continue;
+        }
+
+        // A stop result is only final if no restart replaced the challenge
+        // while poll_once() was publishing it. Holding poll_wait_mutex_ here
+        // closes the race with restart()'s start_polling()/wake.
+        bool stop = false;
+        {
+            std::lock_guard<std::mutex> poll_lock(poll_wait_mutex_);
+            {
+                std::lock_guard<std::mutex> state_lock(state_mutex_);
+                stop = state_ == PairingState::Failed || state_ == PairingState::Expired ||
+                       (state_ == PairingState::Paired && !paired_unacknowledged_);
+            }
+            if (stop) {
+                poll_running_ = false;
+            } else {
+                poll_wakeup_ = true;
+            }
+        }
+        if (stop) {
+            return;
+        }
+    }
 }
 
 bool PairingSession::establish_session(std::string* error) {
@@ -1008,57 +1477,41 @@ bool PairingSession::load_car_session(CarSession* session, std::string* error) {
     // unusable; pairing start would otherwise fetch the same page again.
     cached_car_page_ = page;
 
-    std::string car;
-    if (!extract_car_object(page, &car, error)) {
-        return false;
-    }
-    std::string puck;
-    if (!extract_object_field(car, "puck", &puck)) {
-        if (error) {
-            *error = "car.puck is missing";
-        }
-        return false;
-    }
-    std::string thread;
-    if (!extract_object_field(puck, "thread", &thread)) {
-        if (error) {
-            *error = "car.puck.thread is missing";
-        }
-        return false;
-    }
-
     CarSession parsed;
-    if (!extract_string_field(thread, "id", &parsed.thread_id) || parsed.thread_id.empty()) {
-        if (error) {
-            *error = "car.puck.thread.id is missing";
-        }
+    if (!parse_car_page(page, &parsed, error)) {
         return false;
     }
-
-    std::string actor_config;
-    if (!extract_object_field(puck, "threadActorConfig", &actor_config)) {
-        if (!extract_object_field(page, "threadActorConfig", &actor_config)) {
-            if (error) {
-                *error = "threadActorConfig is missing";
-            }
-            return false;
-        }
-        log::warn("car.puck.threadActorConfig is missing; using the page-level actor config");
-    }
-    if (!extract_string_field(actor_config, "baseURL", &parsed.actor_base_url) ||
-        parsed.actor_base_url.empty()) {
-        if (error) {
-            *error = "threadActorConfig.baseURL is missing";
-        }
-        return false;
-    }
-    extract_string_field(actor_config, "ampURL", &parsed.actor_amp_url);
-    extract_string_field(actor_config, "poolName", &parsed.actor_pool);
-    extract_string_field(actor_config, "capability", &parsed.capability);
-    extract_bool_field(actor_config, "requiresSudoForWrite", &parsed.requires_sudo_for_write);
-
     *session = std::move(parsed);
     cached_car_page_.clear();
+    return true;
+}
+
+bool PairingSession::refresh_authorization(CarSession* session, std::string* error) {
+    if (error) {
+        error->clear();
+    }
+    if (!session) {
+        if (error) {
+            *error = "car session output is null";
+        }
+        return false;
+    }
+    std::string page;
+    if (!http_get(http_, options_.origin + "/car", &page, error)) {
+        return false;
+    }
+    CarSession parsed;
+    if (!parse_car_page(page, &parsed, error)) {
+        return false;
+    }
+    if (parsed.thread_id != session->thread_id) {
+        if (error) {
+            *error = "the car page now belongs to another thread";
+        }
+        return false;
+    }
+    session->capability = std::move(parsed.capability);
+    session->requires_sudo_for_write = parsed.requires_sudo_for_write;
     return true;
 }
 
@@ -1074,7 +1527,9 @@ bool PairingSession::fetch_actor_token(CarSession* session, std::string* error) 
     }
     const std::string amp_url =
         strip_trailing_slash(session->actor_amp_url.empty() ? options_.origin : session->actor_amp_url);
-    const std::string capability = session->capability.empty() ? "write" : session->capability;
+    // A missing capability is not write access. Request the least-privileged
+    // token and leave the call gate closed until /car reports "write".
+    const std::string capability = session->capability.empty() ? "read" : session->capability;
 
     HttpRequest request;
     request.method = "POST";
@@ -1156,6 +1611,52 @@ bool PairingSession::persist(const CarSession& session, std::string* error) {
         return false;
     }
     return true;
+}
+
+void PairingSession::leave_session(std::string* error) {
+    if (error) {
+        error->clear();
+    }
+    HttpRequest request;
+    request.method = "DELETE";
+    request.url = options_.origin + "/api/car/session";
+    request.headers = {
+        {"Origin", options_.origin},
+        {"Referer", options_.origin + "/car"},
+        {"User-Agent", kUserAgent},
+    };
+    std::string delete_error;
+    const HttpResponse response = http_.request(request, &delete_error);
+    if (!delete_error.empty()) {
+        log::warn("car session leave: %s", redact_text(delete_error).c_str());
+        if (error) {
+            *error = delete_error;
+        }
+    } else if (response.status >= 400 && response.status != 401) {
+        log::warn("car session leave returned HTTP %d", response.status);
+        if (error) {
+            *error = "car session leave returned HTTP " + std::to_string(response.status);
+        }
+    } else {
+        log::info("car session leave: temporary session deleted");
+    }
+
+    // The remote DELETE can fail after the server already forgot the session.
+    // Local cleanup is unconditional so the next launch cannot restore the
+    // previous user's account.
+    if (store_) {
+        store_->erase("car.session");
+        store_->erase("http.cookies");
+    }
+    http_.clear_cookies();
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        state_ = PairingState::Idle;
+        qr_ = QrCode{};
+        pairing_url_.clear();
+        last_code_.clear();
+        last_poll_error_.clear();
+    }
 }
 
 bool build_actor_endpoint(const CarSession& session, const std::string& page_load_id,

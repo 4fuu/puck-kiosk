@@ -13,10 +13,11 @@
 ;   - The app keeps its cookie jar and saved car session in
 ;     %LOCALAPPDATA%\puck-kiosk, outside the install directory; uninstall
 ;     leaves that user data alone.
-;   - The executable, the MIT license text, and (when the sprite has been
-;     fetched) the icon are installed. The icon is also compiled into
-;     puck-kiosk.exe at build time; no models, textures, or fonts are
-;     installed. Uninstall removes the re-downloadable assets/cache.
+;   - The executable, the MIT license text, the SpeexDSP BSD notice, and
+;     (when the sprite has been fetched) the icon are installed. The icon is
+;     also compiled into puck-kiosk.exe at build time; no models, textures,
+;     or fonts are installed. Uninstall removes the re-downloadable
+;     assets/cache.
 
 ; The icon comes from the same sprite-derived .ico as the executable. It is
 ; optional: a build without tools/fetch-assets falls back to the executable's
@@ -105,6 +106,9 @@ Section "${APP_NAME}" SecApp
 
     File "/oname=${APP_EXE}" "${PACKAGE_EXEFILE}"
     File "/oname=LICENSE.txt" "${PACKAGE_LICENSEFILE}"
+    ; SpeexDSP is statically linked into the executable; its BSD-3-Clause
+    ; notice must travel with the binary distribution.
+    File "/oname=LICENSE-SpeexDSP.txt" "${PACKAGE_SPEEX_LICENSEFILE}"
 !if "${PACKAGE_ICONFILE}" != ""
     File "/oname=puck-kiosk.ico" "${PACKAGE_ICONFILE}"
 !endif
@@ -171,6 +175,7 @@ Section "Uninstall"
     Delete "$INSTDIR\${APP_EXE}"
     Delete "$INSTDIR\puck-kiosk.ico"
     Delete "$INSTDIR\LICENSE.txt"
+    Delete "$INSTDIR\LICENSE-SpeexDSP.txt"
     Delete "$INSTDIR\assets\manifest.json"
     ; The art is re-downloadable, so the cache goes with the program. The
     ; session in %LOCALAPPDATA%\puck-kiosk is user data and stays.

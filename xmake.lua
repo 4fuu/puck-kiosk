@@ -87,13 +87,31 @@ target("nanovg")
     add_includedirs("third_party/nanovg", { public = true })
     set_warnings("none")
 
+-- Portable echo cancellation. Linux normally uses webrtc-audio-processing,
+-- but the vendored SpeexDSP subset is the backend on Windows and a runtime
+-- fallback when the WebRTC module cannot initialize. It is a small C library
+-- with no platform dependencies, so the same source builds for Linux and the
+-- mingw cross target.
+target("speexdsp")
+    set_kind("static")
+    set_languages("c11")
+    add_files("third_party/speexdsp/libspeexdsp/*.c")
+    add_includedirs("third_party/speexdsp/include", {public = true})
+    add_includedirs("third_party/speexdsp/config")
+    add_defines("HAVE_CONFIG_H")
+    -- SpeexDSP prints setup/xrun diagnostics straight to stderr. The kiosk
+    -- reports the AEC backend and its state through the normal logger, so
+    -- keep the library quiet. This is an upstream-supported build switch.
+    add_defines("DISABLE_WARNINGS")
+    set_warnings("none")
+
 target("puck-kiosk")
     set_kind("binary")
     set_default(true)
     set_rundir("$(projectdir)")
-    add_deps("nanovg")
+    add_deps("nanovg", "speexdsp")
     add_files("src/**.cpp")
-    add_includedirs("src", "third_party")
+    add_includedirs("src", "third_party", "third_party/speexdsp/include")
     if win32 then
         remove_files("src/platform/drm/**.cpp")
         remove_files("src/platform/headless/**.cpp")
@@ -108,6 +126,9 @@ target("puck-kiosk")
         end
         add_defines("PUCK_KIOSK_BACKEND_WIN32=1")
         add_defines("PUCK_KIOSK_CANVAS_NANOVG_GL3=1")
+        -- Windows has no webrtc-audio-processing package; the vendored
+        -- SpeexDSP backend is its echo canceller.
+        add_defines("PUCK_KIOSK_ENABLE_PORTABLE_AEC=1")
         -- Puck3D shares one source with the GLES build and selects desktop GL
         -- 3.3 headers, GLSL, and entry-point loading through this define.
         add_defines("PUCK_KIOSK_GL_DESKTOP=1")
@@ -151,6 +172,7 @@ target("puck-kiosk")
         add_links("EGL", "GLESv2", "m", "dl", "pthread", "png", "webp", "jpeg", "curl", "qrencode",
                   "ssl", "crypto")
         add_defines("PUCK_KIOSK_ENABLE_AEC=1")
+        add_defines("PUCK_KIOSK_ENABLE_PORTABLE_AEC=1")
         add_defines("PUCK_KIOSK_ENABLE_ALSA=1")
     end
     add_defines("PUCK_KIOSK_BACKEND_" .. backend:upper() .. "=1")
@@ -225,6 +247,29 @@ target("ui-render-tests")
     add_links("EGL", "GLESv2", "m", "pthread", "png", "webp", "jpeg")
     set_warnings("all", "extra")
 
+target("call-flow-tests")
+    set_kind("binary")
+    set_default(false)
+    set_rundir("$(projectdir)")
+    add_deps("speexdsp")
+    add_files("tests/call_flow_tests.cpp", "src/app/call_flow.cpp", "src/app/pairing.cpp",
+              "src/core/log.cpp", "src/core/sha256.cpp", "src/voice/engine.cpp", "src/voice/peer_connection.cpp", "src/voice/opus_codec.cpp",
+              "src/voice/rtp.cpp", "src/voice/jitter_buffer.cpp", "src/voice/aec.cpp",
+              "src/platform/audio_file.cpp")
+    add_includedirs("src", "third_party", "third_party/speexdsp/include")
+    add_defines("PUCK_KIOSK_ENABLE_PORTABLE_AEC=1")
+    if win32 then
+        add_packages("libopus", "libdatachannel", "libcurl", "libqrencode",
+                     "libpng", "libwebp", "libjpeg")
+        add_links("ws2_32", "crypt32", "bcrypt", "secur32", "iphlpapi", "advapi32")
+    else
+        add_packages("libdatachannel", "pkgconfig::webrtc-audio-processing-1", "pkgconfig::opus")
+        add_defines("PUCK_KIOSK_ENABLE_AEC=1")
+        add_links("ssl", "crypto", "curl", "qrencode", "png", "webp", "jpeg")
+        add_links("m", "pthread")
+    end
+    set_warnings("all", "extra")
+
 target("voice-tests")
     set_kind("binary")
     set_default(false)
@@ -237,6 +282,31 @@ target("voice-tests")
         add_packages("pkgconfig::opus")
     end
     add_links("m", "pthread")
+    set_warnings("all", "extra")
+
+-- Replayable AEC scenarios: Puck-only, user-only, double talk, and noise
+-- suppression/gain comparisons. It links both compiled backends so the
+-- portable implementation that ships on Windows is exercised on Linux too.
+target("voice-aec-tests")
+    set_kind("binary")
+    set_default(false)
+    set_rundir("$(projectdir)")
+    add_deps("speexdsp")
+    add_files("tests/voice_aec_tests.cpp", "src/voice/aec.cpp", "src/core/log.cpp")
+    add_includedirs("src", "third_party", "third_party/speexdsp/include")
+    add_defines("PUCK_KIOSK_ENABLE_PORTABLE_AEC=1")
+    if not is_plat("windows", "mingw") then
+        add_packages("pkgconfig::webrtc-audio-processing-1")
+        add_defines("PUCK_KIOSK_ENABLE_AEC=1")
+    elseif is_plat("mingw") then
+        -- Keep the Windows test binary self-contained so it can be run with
+        -- wine or copied to a lab machine without the mingw runtime DLLs.
+        add_ldflags("-static", "-static-libgcc", "-static-libstdc++")
+    end
+    if not is_plat("windows", "mingw") then
+        -- libm and pthread are POSIX link names; MSVC has neither.
+        add_links("m", "pthread")
+    end
     set_warnings("all", "extra")
 
 -- Windows installer: a per-user NSIS setup that installs puck-kiosk.exe into
