@@ -1,5 +1,5 @@
 set_project("puck-kiosk")
-set_version("0.1.0")
+set_version("2026.1125.0")
 set_languages("c++17")
 set_encodings("utf-8")
 
@@ -52,10 +52,10 @@ if win32 then
     -- libdatachannel port requires).
     add_repositories("puck-kiosk-packages third_party/xmake-repo")
     add_requires("libcurl")
-    add_requires("libwebp", {configs = {shared = false}})
+    add_requires("libwebp v1.6.0", {configs = {shared = false}})
     add_requires("libpng")
     add_requires("libjpeg")
-    add_requires("libqrencode")
+    add_requires("libqrencode 4.1.1", {configs = {shared = is_plat("windows")}})
     add_requires("libopus")
     add_requires("ixwebsocket v12.1.0", {configs = {ssl = "openssl3", use_tls = true}})
     add_requires("libdatachannel 0.24.6", {configs = {media = true}})

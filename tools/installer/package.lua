@@ -74,6 +74,15 @@ function main(package)
     local icon = import("tools.installer.icon", {rootdir = os.projectdir()})()
     local iconfile = icon and path.absolute(icon.icofile) or ""
 
+    local qrencode_dll = ""
+    if package:is_plat("windows") then
+        local qrencode = target:pkg("libqrencode")
+        qrencode_dll = os.files(path.join(qrencode:installdir(), "*", "qrencode.dll"))[1]
+        if not qrencode_dll then
+            raise("qrencode.dll is missing from the native Windows libqrencode package")
+        end
+    end
+
     local specvars = package:specvars()
     specvars.PACKAGE_EXEFILE = path.absolute(exefile)
     specvars.PACKAGE_OUTPUTFILE = path.absolute(package:outputfile())
@@ -81,6 +90,9 @@ function main(package)
     specvars.PACKAGE_LICENSEFILE = path.absolute(package:get("licensefile"))
     specvars.PACKAGE_SPEEX_LICENSEFILE =
         path.absolute(path.join(os.projectdir(), "third_party", "speexdsp", "COPYING"))
+    specvars.PACKAGE_QRENCODEFILE = qrencode_dll
+    specvars.PACKAGE_QRENCODE_LICENSEFILE =
+        path.absolute(path.join(os.projectdir(), "third_party", "libqrencode", "COPYING"))
     specvars.PACKAGE_MANIFESTFILE = path.absolute(path.join(os.projectdir(), "assets", "manifest.json"))
     -- Bundled art is optional: pack whatever tools/fetch-assets has cached so
     -- an installed copy needs no first-run download. The repo never commits it.

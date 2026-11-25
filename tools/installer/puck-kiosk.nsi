@@ -109,6 +109,10 @@ Section "${APP_NAME}" SecApp
     ; SpeexDSP is statically linked into the executable; its BSD-3-Clause
     ; notice must travel with the binary distribution.
     File "/oname=LICENSE-SpeexDSP.txt" "${PACKAGE_SPEEX_LICENSEFILE}"
+!if "${PACKAGE_QRENCODEFILE}" != ""
+    File "/oname=qrencode.dll" "${PACKAGE_QRENCODEFILE}"
+    File "/oname=LICENSE-libqrencode.txt" "${PACKAGE_QRENCODE_LICENSEFILE}"
+!endif
 !if "${PACKAGE_ICONFILE}" != ""
     File "/oname=puck-kiosk.ico" "${PACKAGE_ICONFILE}"
 !endif
@@ -176,6 +180,8 @@ Section "Uninstall"
     Delete "$INSTDIR\puck-kiosk.ico"
     Delete "$INSTDIR\LICENSE.txt"
     Delete "$INSTDIR\LICENSE-SpeexDSP.txt"
+    Delete "$INSTDIR\qrencode.dll"
+    Delete "$INSTDIR\LICENSE-libqrencode.txt"
     Delete "$INSTDIR\assets\manifest.json"
     ; The art is re-downloadable, so the cache goes with the program. The
     ; session in %LOCALAPPDATA%\puck-kiosk is user data and stays.
